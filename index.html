@@ -6,7 +6,7 @@
 <title>Заявка на оплату</title>
 <!--
   ФИНЦЕНТР TruckStop Z-463 — экран подачи заявки (Telegram Mini App)
-  Версия 1.1 · 09.09.2026 · репозиторий z463-app
+  Версия 1.2 · 09.09.2026 · репозиторий z463-app
 
   Живёт на GitHub Pages, а не в Apps Script. Причина: Apps Script показывает
   страницу во вложенном фрейме, а Telegram передаёт подписанные данные в
@@ -16,6 +16,15 @@
   сервер на разных доменах, а заголовок application/json заставил бы браузер
   сначала послать запрос OPTIONS, на который Apps Script не отвечает. Тело
   всё равно разбирается как JSON.
+
+  v1.2: АДРЕС РАЗВЁРТЫВАНИЯ БОЛЬШЕ НЕ ЗАШИТ В ЭТОТ ФАЙЛ.
+  Он приходит параметром ?api= из кнопки бота, которую ставит функция
+  НАСТРОИТЬ_MINIAPP. Причина: адрес живёт в Apps Script, а файл — на GitHub,
+  и любое новое развёртывание расходило эти два места. Страница обращалась
+  по мёртвому адресу, браузер отдавал «Load failed», а чинить это мог только
+  человек с доступом к репозиторию. Теперь смена развёртывания — запуск одной
+  функции в таблице, GitHub трогать не нужно.
+  Резервный адрес ниже используется, только если параметра нет.
 
   Оформление наследует тему Telegram: экран должен выглядеть частью
   мессенджера, а не чужим сайтом.
@@ -94,6 +103,7 @@
 
   .msg{ padding:14px; border-radius:12px; font-size:15px; margin-bottom:18px;
         background:rgba(214,69,69,.13); color:var(--danger); }
+  .msg small{ display:block; margin-top:8px; color:var(--muted); font-size:13px; }
   .hint{ color:var(--muted); font-size:13px; margin-top:6px; }
   .hidden{ display:none !important; }
 
@@ -196,10 +206,20 @@
 
 <script>
 (function(){
-  // Адрес развёртывания Apps Script. Меняется, только если создать НОВОЕ
-  // развёртывание вместо правки существующего. Правильный путь:
-  // Развернуть → Управление развёртываниями → Изменить → Версия: Новая.
-  var API_URL = 'https://script.google.com/macros/s/AKfycbw08xw-41mJSgXOSmFL3ieJExH4iMMmGj0J-E_95g_bSxTJ_z9DL1y_89Z-8DrD7Drp/exec';
+  // ---------- адрес сервера ----------
+  // Приходит из кнопки бота: .../?api=https://script.google.com/.../exec
+  // Резервный адрес — только на случай, если кнопку поставили без параметра
+  // (например, вручную через BotFather). Держать его в актуальном состоянии
+  // не обязательно: правильный путь — запустить НАСТРОИТЬ_MINIAPP в таблице.
+  var API_FALLBACK = 'ВСТАВЬТЕ_СЮДА_АДРЕС_РАЗВЁРТЫВАНИЯ';
+
+  var API_URL = (function(){
+    var q = '';
+    try{ q = new URLSearchParams(location.search).get('api') || ''; }catch(e){}
+    // Принимаем только адрес Apps Script: параметр приходит из URL, а
+    // отправлять туда подписанные данные кому попало нельзя.
+    return /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(q) ? q : API_FALLBACK;
+  })();
 
   var tg = window.Telegram && window.Telegram.WebApp;
   var initData = tg ? (tg.initData || '') : '';
@@ -209,15 +229,29 @@
 
   function $(id){ return document.getElementById(id); }
   function show(el,on){ el.classList[on?'remove':'add']('hidden'); }
-  function stop(text){
+  function stop(html){
     $('loading').classList.add('hidden');
-    $('blockedText').textContent = text;
+    $('blockedText').innerHTML = html;
     show($('blocked'),true);
   }
   function err(t){
     var e=$('err');
     if(!t){ show(e,false); return; }
     e.textContent=t; show(e,true); e.scrollIntoView({block:'center'});
+  }
+
+  // Сорвавшийся fetch и отказ сервера — разные болезни с разным лечением,
+  // а браузер называет первую невнятно: «Load failed» на iPhone,
+  // «Failed to fetch» на Android. Переводим на язык действий.
+  function netHint(e){
+    var m = String((e && e.message) || e || '');
+    if(/load failed|failed to fetch|networkerror|network request failed/i.test(m)){
+      return 'Сервер не отвечает.<small>Адрес развёртывания недоступен: развёртывание удалено, '+
+             'архивировано или закрыто от анонимного доступа.<br><br>'+
+             'Азамату: запустите в таблице «⚙️ ФИНЦЕНТР → Проверка Mini App» — она покажет, '+
+             'что именно с адресом.</small>';
+    }
+    return 'Сервер ответил с ошибкой.<small>'+m.slice(0,200)+'</small>';
   }
 
   function api(action, data){
@@ -238,6 +272,11 @@
     stop('Эта страница открывается только из Telegram — кнопкой «Заявка» в чате с ботом.');
     return;
   }
+  if(!/^https:\/\/script\.google\.com\//.test(API_URL)){
+    stop('Кнопка настроена не до конца.<small>Адрес сервера не передан. '+
+         'Азамату: запустите в таблице «⚙️ ФИНЦЕНТР → Настроить Mini App».</small>');
+    return;
+  }
 
   api('init').then(function(r){
     if(!r || !r.ok){ stop((r && r.err) ? r.err : 'Не удалось открыть форму.'); return; }
@@ -249,7 +288,7 @@
     show($('form'),true);
     show($('submitBar'),true);
   }).catch(function(e){
-    stop('Сервер не ответил: ' + (e && e.message ? e.message : e));
+    stop(netHint(e));
   });
 
   // ---------- поставщик ----------
@@ -372,8 +411,7 @@
       S.sending = false;
       $('send').disabled = false;
       $('send').textContent = 'Подать заявку';
-      err('Сервер не ответил: ' + (e && e.message ? e.message : e) +
-          ' Заявка НЕ подана — попробуйте ещё раз.');
+      err('Заявка НЕ подана — сервер не ответил. Попробуйте ещё раз через минуту.');
     });
   });
 
