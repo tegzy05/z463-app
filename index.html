@@ -2,81 +2,384 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Проверка связи</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Заявка на оплату</title>
 <!--
-  ФИНЦЕНТР Z-463 — проверочная страница. Не рабочая форма.
-  Задача одна: показать, доходят ли до страницы данные Telegram (initData).
-  Если доходят — на этот хостинг можно переносить экран подачи заявок.
-  После проверки файл заменяется настоящей страницей.
+  ФИНЦЕНТР TruckStop Z-463 — экран подачи заявки (Telegram Mini App)
+  Версия 1.1 · 09.09.2026 · репозиторий z463-app
+
+  Живёт на GitHub Pages, а не в Apps Script. Причина: Apps Script показывает
+  страницу во вложенном фрейме, а Telegram передаёт подписанные данные в
+  хеш-части адреса — до фрейма она не доходит, initData всегда пустой.
+
+  Отправка идёт с Content-Type: text/plain. Это не небрежность: страница и
+  сервер на разных доменах, а заголовок application/json заставил бы браузер
+  сначала послать запрос OPTIONS, на который Apps Script не отвечает. Тело
+  всё равно разбирается как JSON.
+
+  Оформление наследует тему Telegram: экран должен выглядеть частью
+  мессенджера, а не чужим сайтом.
 -->
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root{
-    --bg: var(--tg-theme-bg-color, #fff);
-    --fg: var(--tg-theme-text-color, #000);
-    --muted: var(--tg-theme-hint-color, #888);
-    --card: var(--tg-theme-secondary-bg-color, #f2f2f7);
-    --ok: #1c8c4a; --no: #d64545;
+    --bg:      var(--tg-theme-bg-color, #ffffff);
+    --fg:      var(--tg-theme-text-color, #000000);
+    --muted:   var(--tg-theme-hint-color, #8b8b8b);
+    --card:    var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --accent:  var(--tg-theme-button-color, #2481cc);
+    --onAccent:var(--tg-theme-button-text-color, #ffffff);
+    --danger:  #d64545;
+    --line:    rgba(128,128,128,.22);
   }
-  body{ margin:0; padding:20px 16px 40px; background:var(--bg); color:var(--fg);
-        font:16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  h1{ font-size:19px; margin:0 0 18px; font-weight:600; }
-  .verdict{ padding:16px; border-radius:12px; font-size:17px; font-weight:600;
-            margin-bottom:22px; text-align:center; }
-  .verdict.ok{ background:rgba(28,140,74,.13); color:var(--ok); }
-  .verdict.no{ background:rgba(214,69,69,.13); color:var(--no); }
-  table{ width:100%; border-collapse:collapse; font-size:14px; }
-  td{ padding:11px 0; border-bottom:1px solid rgba(128,128,128,.22); vertical-align:top; }
-  td:first-child{ color:var(--muted); width:42%; padding-right:14px; }
-  td:last-child{ word-break:break-all; font-family:ui-monospace, Menlo, Consolas, monospace; }
-  p.note{ color:var(--muted); font-size:13px; margin-top:22px; }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; padding:0; background:var(--bg); color:var(--fg); }
+  body{
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 12px 16px 120px;
+  }
+  h1{ font-size:20px; font-weight:600; margin:4px 0 2px; }
+  .who{ color:var(--muted); font-size:14px; margin-bottom:20px; }
+
+  label{ display:block; font-size:14px; color:var(--muted); margin:0 0 6px; }
+  .field{ margin-bottom:20px; }
+
+  input[type=text], input[type=tel], textarea{
+    width:100%; font:inherit; color:var(--fg); background:var(--card);
+    border:1px solid transparent; border-radius:12px; padding:13px 14px;
+    appearance:none;
+  }
+  input:focus, textarea:focus{ outline:none; border-color:var(--accent); }
+  textarea{ resize:none; min-height:76px; }
+
+  /* Сумма — единственный крупный элемент. Её проверяют и заявитель,
+     и согласующий, поэтому она должна читаться с вытянутой руки. */
+  #sum{ font-size:30px; font-weight:600; letter-spacing:-0.5px; padding:14px; }
+  .sumRow{ display:flex; align-items:baseline; gap:10px; }
+  .sumRow .cur{ font-size:20px; color:var(--muted); }
+
+  .opts{ display:flex; gap:10px; }
+  .opt{
+    flex:1; text-align:center; padding:13px 8px; border-radius:12px;
+    background:var(--card); border:1.5px solid transparent; cursor:pointer;
+    font-size:15px; user-select:none;
+  }
+  .opt[aria-pressed="true"]{ border-color:var(--accent); color:var(--accent); font-weight:600; }
+
+  .check{ display:flex; align-items:center; gap:12px; padding:13px 14px;
+          background:var(--card); border-radius:12px; cursor:pointer; }
+  .check input{ width:20px; height:20px; accent-color:var(--accent); margin:0; flex:none; }
+  .check span{ font-size:15px; }
+  .check small{ display:block; color:var(--muted); font-size:13px; }
+
+  .found{ margin-top:8px; border-radius:12px; overflow:hidden; background:var(--card); }
+  .found div{ padding:12px 14px; border-bottom:1px solid var(--line); cursor:pointer; font-size:15px; }
+  .found div:last-child{ border-bottom:none; }
+  .picked{ display:flex; align-items:center; justify-content:space-between; gap:12px;
+           background:var(--card); border-radius:12px; padding:13px 14px; }
+  .picked b{ font-weight:600; }
+  .picked button{ background:none; border:none; color:var(--accent); font:inherit;
+                  padding:0; cursor:pointer; flex:none; }
+
+  .submit{
+    position:fixed; left:0; right:0; bottom:0; padding:12px 16px 20px;
+    background:linear-gradient(to top, var(--bg) 72%, transparent);
+  }
+  .submit button{
+    width:100%; padding:16px; font:inherit; font-size:17px; font-weight:600;
+    background:var(--accent); color:var(--onAccent); border:none; border-radius:12px;
+    cursor:pointer;
+  }
+  .submit button[disabled]{ opacity:.45; }
+
+  .msg{ padding:14px; border-radius:12px; font-size:15px; margin-bottom:18px;
+        background:rgba(214,69,69,.13); color:var(--danger); }
+  .hint{ color:var(--muted); font-size:13px; margin-top:6px; }
+  .hidden{ display:none !important; }
+
+  .done{ text-align:center; padding:56px 20px; }
+  .done .num{ font-size:40px; font-weight:600; margin:14px 0 6px; }
+  .done p{ color:var(--muted); margin:0 0 26px; }
+  .done button{ font:inherit; font-size:16px; padding:14px 30px; border:none;
+                border-radius:12px; background:var(--card); color:var(--fg); cursor:pointer; }
 </style>
 </head>
 <body>
 
-<h1>Проверка связи с Telegram</h1>
-<div id="verdict" class="verdict">Проверяю…</div>
-<table id="rows"></table>
-<p class="note">Это временная страница. Если проверка прошла — на её место встанет форма подачи заявки.</p>
+<div id="loading" class="who">Загружаю…</div>
+
+<div id="blocked" class="hidden">
+  <div class="msg" id="blockedText"></div>
+</div>
+
+<div id="form" class="hidden">
+  <h1>Заявка на оплату</h1>
+  <div class="who" id="who"></div>
+
+  <div id="err" class="msg hidden"></div>
+
+  <div class="field">
+    <label for="supQ">Кому платим</label>
+    <div id="supPick">
+      <input type="text" id="supQ" placeholder="Начните вводить название" autocomplete="off">
+      <div class="found hidden" id="supFound"></div>
+      <div class="hint">Нет в списке? Введите название целиком и выберите «Добавить нового».</div>
+    </div>
+    <div class="picked hidden" id="supPicked">
+      <b id="supName"></b>
+      <button type="button" id="supClear">Изменить</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <label for="what">За что платим</label>
+    <textarea id="what" placeholder="Коротко, одной фразой"></textarea>
+  </div>
+
+  <div class="field">
+    <label for="sum">Сумма</label>
+    <div class="sumRow">
+      <input type="tel" id="sum" inputmode="numeric" placeholder="0">
+      <span class="cur">₸</span>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>Как платим</label>
+    <div class="opts" id="cashOpts">
+      <div class="opt" data-v="Безнал" aria-pressed="true">Безнал</div>
+      <div class="opt" data-v="Наличные" aria-pressed="false">Наличные</div>
+    </div>
+  </div>
+
+  <div class="field hidden" id="lineField">
+    <label>Линия</label>
+    <div class="opts" id="lineOpts">
+      <div class="opt" data-v="Текущая работа (RUN)" aria-pressed="true">Текущая работа</div>
+      <div class="opt" data-v="Развитие (BUILD)" aria-pressed="false">Развитие</div>
+    </div>
+  </div>
+
+  <div class="field hidden" id="cashboxField">
+    <label class="check">
+      <input type="checkbox" id="cashbox">
+      <span>Деньги уже выданы из кассы юнита
+        <small>Заявка уйдёт на подтверждение задним числом</small></span>
+    </label>
+  </div>
+
+  <div class="field">
+    <label class="check">
+      <input type="checkbox" id="urgent">
+      <span>Срочно
+        <small>Авария, штраф, простой. Уйдёт сразу Алуа и Аманкали</small></span>
+    </label>
+  </div>
+
+  <div class="field">
+    <label for="doc">Номер счёта или накладной</label>
+    <input type="text" id="doc" placeholder="Необязательно">
+    <div class="hint">Фото счёта отправьте боту сообщением сразу после подачи.</div>
+  </div>
+</div>
+
+<div class="submit hidden" id="submitBar">
+  <button id="send">Подать заявку</button>
+</div>
+
+<div id="done" class="done hidden">
+  <div>Заявка принята</div>
+  <div class="num" id="doneNum"></div>
+  <p id="doneText"></p>
+  <button id="closeBtn">Закрыть</button>
+</div>
 
 <script>
 (function(){
+  // Адрес развёртывания Apps Script. Меняется, только если создать НОВОЕ
+  // развёртывание вместо правки существующего. Правильный путь:
+  // Развернуть → Управление развёртываниями → Изменить → Версия: Новая.
+  var API_URL = 'https://script.google.com/macros/s/AKfycbw08xw-41mJSgXOSmFL3ieJExH4iMMmGj0J-E_95g_bSxTJ_z9DL1y_89Z-8DrD7Drp/exec';
+
   var tg = window.Telegram && window.Telegram.WebApp;
+  var initData = tg ? (tg.initData || '') : '';
   if(tg){ tg.ready(); tg.expand(); }
 
-  var initData = tg ? (tg.initData || '') : '';
-  var u = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) || null;
+  var S = { suppliers:[], sup:'', isNew:false, cash:'Безнал', line:'', n1:50000, sending:false };
 
-  var rows = [
-    ['Объект Telegram', tg ? 'есть' : 'НЕТ'],
-    ['Платформа',       tg && tg.platform ? tg.platform : '—'],
-    ['Версия',          tg && tg.version ? tg.version : '—'],
-    ['initData',        initData ? ('получен, ' + initData.length + ' символов') : 'ПУСТО'],
-    ['Ваш Telegram ID', u && u.id ? String(u.id) : '—'],
-    ['Имя',             u ? [u.first_name, u.last_name].filter(Boolean).join(' ') : '—'],
-    ['Хеш адреса',      location.hash ? location.hash.slice(0,60) : 'пусто'],
-    ['Хост',            location.host]
-  ];
+  function $(id){ return document.getElementById(id); }
+  function show(el,on){ el.classList[on?'remove':'add']('hidden'); }
+  function stop(text){
+    $('loading').classList.add('hidden');
+    $('blockedText').textContent = text;
+    show($('blocked'),true);
+  }
+  function err(t){
+    var e=$('err');
+    if(!t){ show(e,false); return; }
+    e.textContent=t; show(e,true); e.scrollIntoView({block:'center'});
+  }
 
-  var t = document.getElementById('rows');
-  rows.forEach(function(r){
-    var tr = t.insertRow();
-    tr.insertCell().textContent = r[0];
-    tr.insertCell().textContent = r[1];
+  function api(action, data){
+    return fetch(API_URL,{
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({action:action, initData:initData, data:data||{}})
+    }).then(function(r){ return r.text(); }).then(function(t){
+      try{ return JSON.parse(t); }
+      catch(e){
+        throw new Error('Сервер ответил не по формату. Скорее всего, развёртывание не обновлено.');
+      }
+    });
+  }
+
+  // ---------- запуск ----------
+  if(!initData){
+    stop('Эта страница открывается только из Telegram — кнопкой «Заявка» в чате с ботом.');
+    return;
+  }
+
+  api('init').then(function(r){
+    if(!r || !r.ok){ stop((r && r.err) ? r.err : 'Не удалось открыть форму.'); return; }
+    $('loading').classList.add('hidden');
+    S.suppliers = r.suppliers || [];
+    S.n1 = r.n1 || 50000;
+    $('who').textContent = r.name + (r.unit ? ' · ' + r.unit : '');
+    if(r.needsLine){ show($('lineField'),true); S.line = 'Текущая работа (RUN)'; }
+    show($('form'),true);
+    show($('submitBar'),true);
+  }).catch(function(e){
+    stop('Сервер не ответил: ' + (e && e.message ? e.message : e));
   });
 
-  var v = document.getElementById('verdict');
-  if(initData){
-    v.className = 'verdict ok';
-    v.textContent = 'Работает. Данные Telegram получены.';
-  } else if(tg){
-    v.className = 'verdict no';
-    v.textContent = 'Telegram есть, но данные не переданы.';
-  } else {
-    v.className = 'verdict no';
-    v.textContent = 'Страница открыта не из Telegram.';
+  // ---------- поставщик ----------
+  var q = $('supQ'), found = $('supFound');
+
+  q.addEventListener('input', function(){
+    var v = q.value.trim().toLowerCase();
+    found.innerHTML = '';
+    if(v.length < 2){ show(found,false); return; }
+
+    S.suppliers.filter(function(n){
+      return n.toLowerCase().indexOf(v) > -1;
+    }).slice(0,8).forEach(function(n){
+      var d = document.createElement('div');
+      d.textContent = n;
+      d.addEventListener('click', function(){ pick(n,false); });
+      found.appendChild(d);
+    });
+
+    // Новый поставщик — не «ничего не найдено», а действие. Показываем
+    // всегда: совпадение по подстроке не значит, что нужный там есть.
+    var add = document.createElement('div');
+    var span = document.createElement('span');
+    span.style.color = 'var(--accent)';
+    span.textContent = 'Добавить нового: ' + q.value.trim();
+    add.appendChild(span);
+    add.addEventListener('click', function(){ pick(q.value.trim(), true); });
+    found.appendChild(add);
+
+    show(found,true);
+  });
+
+  function pick(name, isNew){
+    if(!name) return;
+    S.sup = name; S.isNew = isNew;
+    $('supName').textContent = name + (isNew ? ' — новый' : '');
+    show($('supPick'),false);
+    show($('supPicked'),true);
+    err('');
   }
+
+  $('supClear').addEventListener('click', function(){
+    S.sup=''; S.isNew=false; q.value='';
+    found.innerHTML=''; show(found,false);
+    show($('supPicked'),false);
+    show($('supPick'),true);
+    q.focus();
+  });
+
+  // ---------- сумма ----------
+  var sumEl = $('sum');
+  sumEl.addEventListener('input', function(){
+    var d = sumEl.value.replace(/[^\d]/g,'');
+    sumEl.value = d ? Number(d).toLocaleString('ru-RU').replace(/,/g,' ') : '';
+    toggleCashbox();
+  });
+  function sumVal(){ return Number(sumEl.value.replace(/[^\d]/g,'')) || 0; }
+
+  // ---------- переключатели ----------
+  function group(el, onPick){
+    el.addEventListener('click', function(ev){
+      var t = ev.target.closest('.opt');
+      if(!t) return;
+      Array.prototype.forEach.call(el.children, function(c){
+        c.setAttribute('aria-pressed', String(c === t));
+      });
+      onPick(t.getAttribute('data-v'));
+    });
+  }
+  group($('cashOpts'), function(v){ S.cash = v; toggleCashbox(); });
+  group($('lineOpts'), function(v){ S.line = v; });
+
+  // «Уже выдано из кассы» имеет смысл только для мелкой налички —
+  // в остальных случаях вопрос лишний и только путает.
+  function toggleCashbox(){
+    var on = (S.cash === 'Наличные' && sumVal() > 0 && sumVal() <= S.n1);
+    show($('cashboxField'), on);
+    if(!on) $('cashbox').checked = false;
+  }
+
+  // ---------- отправка ----------
+  $('send').addEventListener('click', function(){
+    if(S.sending) return;
+    err('');
+
+    if(!S.sup){ err('Выберите поставщика'); return; }
+    if(!$('what').value.trim()){ err('Заполните, за что платим'); return; }
+    if(sumVal() <= 0){ err('Укажите сумму'); return; }
+
+    S.sending = true;
+    $('send').disabled = true;
+    $('send').textContent = 'Отправляю…';
+
+    api('submit',{
+      sup: S.sup,
+      what: $('what').value.trim(),
+      sum: String(sumVal()),
+      cash: S.cash,
+      line: S.line,
+      urgent: $('urgent').checked,
+      paidFromCash: $('cashbox').checked,
+      doc: $('doc').value.trim()
+    }).then(function(r){
+      S.sending = false;
+      if(!r || !r.ok){
+        $('send').disabled = false;
+        $('send').textContent = 'Подать заявку';
+        err((r && r.err) ? r.err : 'Заявка не создана. Попробуйте ещё раз.');
+        return;
+      }
+      show($('form'),false);
+      show($('submitBar'),false);
+      $('doneNum').textContent = '№' + r.num;
+      $('doneText').textContent = S.isNew
+        ? 'Новый поставщик добавлен — Лаура заполнит его профиль. Ответы придут в чат с ботом.'
+        : 'Ответы по заявке придут в чат с ботом. Фото счёта можно отправить туда же.';
+      show($('done'),true);
+      if(tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+    }).catch(function(e){
+      S.sending = false;
+      $('send').disabled = false;
+      $('send').textContent = 'Подать заявку';
+      err('Сервер не ответил: ' + (e && e.message ? e.message : e) +
+          ' Заявка НЕ подана — попробуйте ещё раз.');
+    });
+  });
+
+  $('closeBtn').addEventListener('click', function(){
+    if(tg && tg.close) tg.close(); else window.close();
+  });
 })();
 </script>
 </body>
