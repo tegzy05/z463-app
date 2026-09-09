@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Проверка связи</title>
+<!--
+  ФИНЦЕНТР Z-463 — проверочная страница. Не рабочая форма.
+  Задача одна: показать, доходят ли до страницы данные Telegram (initData).
+  Если доходят — на этот хостинг можно переносить экран подачи заявок.
+  После проверки файл заменяется настоящей страницей.
+-->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg: var(--tg-theme-bg-color, #fff);
+    --fg: var(--tg-theme-text-color, #000);
+    --muted: var(--tg-theme-hint-color, #888);
+    --card: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --ok: #1c8c4a; --no: #d64545;
+  }
+  body{ margin:0; padding:20px 16px 40px; background:var(--bg); color:var(--fg);
+        font:16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  h1{ font-size:19px; margin:0 0 18px; font-weight:600; }
+  .verdict{ padding:16px; border-radius:12px; font-size:17px; font-weight:600;
+            margin-bottom:22px; text-align:center; }
+  .verdict.ok{ background:rgba(28,140,74,.13); color:var(--ok); }
+  .verdict.no{ background:rgba(214,69,69,.13); color:var(--no); }
+  table{ width:100%; border-collapse:collapse; font-size:14px; }
+  td{ padding:11px 0; border-bottom:1px solid rgba(128,128,128,.22); vertical-align:top; }
+  td:first-child{ color:var(--muted); width:42%; padding-right:14px; }
+  td:last-child{ word-break:break-all; font-family:ui-monospace, Menlo, Consolas, monospace; }
+  p.note{ color:var(--muted); font-size:13px; margin-top:22px; }
+</style>
+</head>
+<body>
+
+<h1>Проверка связи с Telegram</h1>
+<div id="verdict" class="verdict">Проверяю…</div>
+<table id="rows"></table>
+<p class="note">Это временная страница. Если проверка прошла — на её место встанет форма подачи заявки.</p>
+
+<script>
+(function(){
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if(tg){ tg.ready(); tg.expand(); }
+
+  var initData = tg ? (tg.initData || '') : '';
+  var u = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) || null;
+
+  var rows = [
+    ['Объект Telegram', tg ? 'есть' : 'НЕТ'],
+    ['Платформа',       tg && tg.platform ? tg.platform : '—'],
+    ['Версия',          tg && tg.version ? tg.version : '—'],
+    ['initData',        initData ? ('получен, ' + initData.length + ' символов') : 'ПУСТО'],
+    ['Ваш Telegram ID', u && u.id ? String(u.id) : '—'],
+    ['Имя',             u ? [u.first_name, u.last_name].filter(Boolean).join(' ') : '—'],
+    ['Хеш адреса',      location.hash ? location.hash.slice(0,60) : 'пусто'],
+    ['Хост',            location.host]
+  ];
+
+  var t = document.getElementById('rows');
+  rows.forEach(function(r){
+    var tr = t.insertRow();
+    tr.insertCell().textContent = r[0];
+    tr.insertCell().textContent = r[1];
+  });
+
+  var v = document.getElementById('verdict');
+  if(initData){
+    v.className = 'verdict ok';
+    v.textContent = 'Работает. Данные Telegram получены.';
+  } else if(tg){
+    v.className = 'verdict no';
+    v.textContent = 'Telegram есть, но данные не переданы.';
+  } else {
+    v.className = 'verdict no';
+    v.textContent = 'Страница открыта не из Telegram.';
+  }
+})();
+</script>
+</body>
+</html>
