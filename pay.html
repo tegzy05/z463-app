@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="z463-page" content="pay">
+<title>Z-463 · Казна</title>
+<!--
+  ФИНЦЕНТР Z-463 — экран казначея. Лежит в репозитории z463-app рядом с index.html.
+
+  Адрес сервера НЕ зашит в этот файл: он приходит параметром ?api= в кнопке
+  бота (ПАРАМЕТРЫ → WEBAPP_URL). Сменили развёртывание — ничего здесь не трогаем.
+
+  Страница ничего не решает сама. Каждое действие сервер перепроверяет:
+  подпись Telegram, роль казначея, статус заявки под замком, сумму, счёт, дату.
+  Всё, что приходит с сервера, выводится через textContent — названия
+  поставщиков и «за что» набирают люди, HTML из них не исполняется.
+-->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg:   var(--tg-theme-bg-color, #ffffff);
+    --bg2:  var(--tg-theme-secondary-bg-color, #eef0f3);
+    --tx:   var(--tg-theme-text-color, #16191d);
+    --hint: var(--tg-theme-hint-color, #858b94);
+    --acc:  var(--tg-theme-button-color, #2b7de0);
+    --acc-tx: var(--tg-theme-button-text-color, #ffffff);
+    --red:  var(--tg-theme-destructive-text-color, #d23f36);
+    --green:#1c9656;
+    --sep:  rgba(128,128,128,.22);
+    --r-group: 14px;
+    --r-ctl: 10px;
+  }
+  @supports (color: color-mix(in srgb, red 50%, blue)){
+    :root{ --sep: color-mix(in srgb, var(--hint) 28%, transparent); }
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; background:var(--bg2); color:var(--tx);
+    font:15px/1.4 -apple-system, "SF Pro Text", Roboto, "Segoe UI", system-ui, sans-serif;
+    -webkit-text-size-adjust:100%; }
+  body{ padding:12px 12px calc(24px + env(safe-area-inset-bottom)); max-width:640px; margin:0 auto; }
+  button{ font:inherit; color:inherit; }
+  .num{ font-variant-numeric: tabular-nums; }
+  :focus-visible{ outline:2px solid var(--acc); outline-offset:2px; }
+
+  /* Сводка */
+  .top{ display:flex; align-items:flex-end; justify-content:space-between; gap:12px; padding:4px 4px 12px; }
+  .who{ color:var(--hint); font-size:13px; }
+  .queue{ font-size:22px; font-weight:700; letter-spacing:-.01em; margin-top:2px; }
+  .sub{ font-size:14px; color:var(--hint); margin-top:1px; }
+  .reload{ background:none; border:0; color:var(--acc); padding:6px 2px; cursor:pointer; white-space:nowrap; }
+  .note{ background:var(--bg); border-radius:var(--r-ctl); padding:10px 12px; margin:0 0 10px; font-size:14px; }
+  .note.warn{ color:var(--red); }
+
+  /* Фильтр линий */
+  .seg{ display:flex; background:var(--bg); border-radius:var(--r-ctl); padding:3px; margin-bottom:12px; }
+  .seg button{ flex:1; border:0; background:none; padding:7px 4px; border-radius:8px; cursor:pointer; color:var(--hint); }
+  .seg button[aria-pressed="true"]{ background:var(--bg2); color:var(--tx); font-weight:600; }
+
+  /* Список */
+  .list{ background:var(--bg); border-radius:var(--r-group); overflow:hidden; }
+  .item + .item{ border-top:1px solid var(--sep); }
+  .row{ display:grid; grid-template-columns:1fr auto; gap:2px 12px; width:100%; text-align:left;
+    background:none; border:0; padding:12px 14px; cursor:pointer; }
+  .sup{ font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .amt{ font-weight:650; font-size:17px; text-align:right; white-space:nowrap; }
+  .what{ color:var(--hint); font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .meta{ font-size:13px; color:var(--hint); text-align:right; white-space:nowrap; }
+  .meta.late{ color:var(--red); }
+  .tag{ display:inline-block; font-size:12px; font-weight:600; color:var(--red); margin-right:6px; }
+
+  /* Раскрытая заявка */
+  .body{ padding:0 14px 14px; }
+  .facts{ display:grid; grid-template-columns:auto 1fr; gap:4px 12px; margin:0 0 14px; font-size:14px; }
+  .facts dt{ color:var(--hint); }
+  .facts dd{ margin:0; overflow-wrap:anywhere; }
+  .facts .miss{ color:var(--red); }
+  .lbl{ font-size:13px; color:var(--hint); margin:0 0 6px; }
+  .accs{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px; }
+  .acc{ border:1px solid var(--sep); background:var(--bg); border-radius:999px; padding:7px 12px; cursor:pointer; font-size:14px; }
+  .acc[aria-checked="true"]{ border-color:var(--acc); background:var(--acc); color:var(--acc-tx); }
+  .acc.other{ color:var(--hint); }
+  .acc.other[aria-checked="true"]{ color:var(--acc-tx); }
+  .hint{ font-size:13px; color:var(--hint); min-height:1em; margin:2px 0 12px; }
+  .hint.warn{ color:var(--red); }
+  .date{ display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+  .date input{ font:inherit; color:var(--tx); background:var(--bg2); border:0; border-radius:var(--r-ctl); padding:8px 10px; }
+  .go{ width:100%; border:0; border-radius:var(--r-ctl); padding:13px; background:var(--acc); color:var(--acc-tx);
+    font-weight:600; cursor:pointer; }
+  .go:disabled{ opacity:.45; cursor:default; }
+  .alt{ display:block; margin:10px auto 0; background:none; border:0; color:var(--red); padding:6px; cursor:pointer; font-size:14px; }
+  .refuse textarea{ width:100%; min-height:72px; font:inherit; color:var(--tx); background:var(--bg2); border:0;
+    border-radius:var(--r-ctl); padding:10px; resize:vertical; margin-bottom:10px; }
+  .pair{ display:flex; gap:8px; }
+  .pair button{ flex:1; border:0; border-radius:var(--r-ctl); padding:12px; cursor:pointer; font-weight:600; }
+  .pair .no{ background:var(--red); color:#fff; }
+  .pair .back{ background:var(--bg2); }
+  .err{ color:var(--red); font-size:14px; margin-top:10px; }
+
+  /* Штамп — единственный «громкий» элемент: так выглядит отметка на бумажной платёжке */
+  .done{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; }
+  .done > div{ flex:1; min-width:0; }
+  .done .sup{ color:var(--hint); font-weight:500; }
+  .done .what{ font-size:13px; }
+  .stamp{ display:inline-block; border:2px solid currentColor; border-radius:5px; padding:1px 8px;
+    font-weight:800; font-size:13px; letter-spacing:.08em; transform:rotate(-5deg); color:var(--green);
+    animation:press .32s cubic-bezier(.2,.9,.3,1.2); white-space:nowrap; flex:none; margin-right:2px; }
+  .stamp.red{ color:var(--red); }
+  .stamp.grey{ color:var(--hint); }
+  @keyframes press{ from{ transform:rotate(-5deg) scale(1.6); opacity:0; } to{ transform:rotate(-5deg) scale(1); opacity:1; } }
+  @media (prefers-reduced-motion: reduce){ .stamp{ animation:none; } }
+
+  .state{ text-align:center; color:var(--hint); padding:48px 16px; }
+  .state strong{ display:block; color:var(--tx); font-size:17px; margin-bottom:6px; }
+  .state button{ margin-top:14px; border:0; border-radius:var(--r-ctl); padding:10px 18px; background:var(--acc); color:var(--acc-tx); cursor:pointer; }
+</style>
+</head>
+<body>
+<div class="top" id="top" hidden>
+  <div>
+    <div class="who" id="who"></div>
+    <div class="queue num" id="queue"></div>
+    <div class="sub" id="sub"></div>
+  </div>
+  <button class="reload" id="reload" type="button">Обновить</button>
+</div>
+<div id="notes"></div>
+<div class="seg" id="seg" role="group" aria-label="Линия" hidden></div>
+<div class="list" id="list" hidden></div>
+<div class="state" id="state"><strong>Загружаю очередь…</strong></div>
+
+<script>
+(function(){
+  'use strict';
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if(tg){ try{ tg.ready(); tg.expand(); }catch(e){} }
+  // Поле даты и прочие системные элементы — в тон теме Telegram (иначе в тёмной теме значок календаря теряется).
+  if(tg && tg.colorScheme) document.documentElement.style.colorScheme = tg.colorScheme;
+
+  var qs = new URLSearchParams(location.search);
+  var API = qs.get('api') || '';
+  var FOCUS = Number(qs.get('n')) || 0;
+  // Шлём подпись только на сервер Apps Script. Любой другой адрес в ссылке —
+  // повод остановиться, а не отправлять казначейскую подпись неизвестно куда.
+  var API_OK = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(API);
+
+  var D = null;            // ответ payInit
+  var filter = 'all';
+  var openNum = 0;
+  var choice = {};         // num → счёт
+  var dateOf = {};         // num → yyyy-mm-dd
+  var refusing = {};       // num → true, если открыта форма отказа
+  var refuseText = {};     // num → набранная причина (переживает перерисовку)
+  var busy = {};           // num → true во время запроса
+  var errOf = {};          // num → текст ошибки
+  var lastAcc = {};        // «юрлицо|нал» → счёт, выбранный в этой сессии
+
+  var $ = function(id){ return document.getElementById(id); };
+  function el(tag, cls, text){
+    var n = document.createElement(tag);
+    if(cls) n.className = cls;
+    if(text!==undefined && text!==null) n.textContent = String(text);
+    return n;
+  }
+  function money(n){ return (Number(n)||0).toLocaleString('ru-RU') + ' ₸'; }
+  function ruDate(iso){ var p = String(iso).split('-'); return p.length===3 ? p[2]+'.'+p[1]+'.'+p[0] : iso; }
+  function short(s, n){ s = String(s||''); return s.length>n ? s.slice(0,n-1)+'…' : s; }
+  function haptic(kind){ try{ tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(kind); }catch(e){} }
+
+  function ask(text){
+    return new Promise(function(res){
+      if(tg && tg.showConfirm && tg.isVersionAtLeast && tg.isVersionAtLeast('6.2')){
+        try{ tg.showConfirm(short(text, 250), function(ok){ res(!!ok); }); return; }catch(e){}
+      }
+      res(window.confirm(text));
+    });
+  }
+
+  function api(action, data){
+    var ctl = ('AbortController' in window) ? new AbortController() : null;
+    var t = ctl ? setTimeout(function(){ ctl.abort(); }, 30000) : null;
+    // text/plain — без предварительного OPTIONS, на который Apps Script не отвечает.
+    return fetch(API, {
+      method:'POST', redirect:'follow',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({action:action, initData:(tg && tg.initData) || '', data:data||{}}),
+      signal: ctl ? ctl.signal : undefined
+    }).then(function(r){ return r.json(); })
+      .catch(function(){ return {ok:false, net:true, err:'Нет связи с сервером. Проверьте интернет и повторите — отметка не сделана.'}; })
+      .finally(function(){ if(t) clearTimeout(t); });
+  }
+
+  function showState(title, text, btn){
+    $('top').hidden = !D; $('seg').hidden = true; $('list').hidden = true;
+    var s = $('state'); s.hidden = false; s.textContent = '';
+    s.appendChild(el('strong', null, title));
+    if(text) s.appendChild(el('div', null, text));
+    if(btn){ var b = el('button', null, btn); b.type='button'; b.onclick = load; s.appendChild(b); }
+  }
+
+  // ---------- Загрузка ----------
+  function load(){
+    if(!tg || !tg.initData) return showState('Откройте из Telegram',
+      'Эта страница работает только из чата с ботом — кнопкой «Провести оплату» или командой /оплаты.');
+    if(!API_OK) return showState('Кнопка устарела',
+      'Отправьте боту /оплаты — придёт свежая кнопка.');
+    showState('Загружаю очередь…');
+    api('payInit', {n:FOCUS}).then(function(r){
+      if(!r || !r.ok) return showState('Не получилось открыть очередь', (r && r.err) || 'Неизвестная ошибка', 'Повторить');
+      D = r;
+      choice = {}; dateOf = {}; refusing = {}; busy = {}; errOf = {};
+      D.items.forEach(function(it){
+        if(it.acc && D.accounts.some(function(a){ return a.name===it.acc; })) choice[it.num] = it.acc;
+      });
+      if(FOCUS && D.focus && D.focus.inQueue){ openNum = FOCUS; filter = 'all'; }
+      renderNotes();
+      render();
+      if(openNum){
+        var n = document.querySelector('[data-num="'+openNum+'"]');
+        if(n) n.scrollIntoView({block:'start', behavior:'auto'});
+      }
+      FOCUS = 0;   // фокус — только на первой загрузке
+    });
+  }
+
+  function renderNotes(){
+    var box = $('notes'); box.textContent = '';
+    if(D.backup) box.appendChild(el('div','note','Вы замещаете казначея. Лаура получит сообщение о каждой вашей отметке.'));
+    if(D.payDay) box.appendChild(el('div','note','Сегодня платёжный день — удобно провести безнал разом.'));
+    if(D.focus && !D.focus.inQueue)
+      box.appendChild(el('div','note warn','Заявка №'+D.focus.num+' уже не в очереди: «'+D.focus.status+'».'));
+  }
+
+  // ---------- Отрисовка ----------
+  function left(){ return D.items.filter(function(it){ return !it.done; }); }
+
+  function render(){
+    $('state').hidden = true;
+    $('top').hidden = false;
+    var who = D.name + (D.backup ? ', замещение казначея' : ', казначей');
+    $('who').textContent = who;
+
+    var rest = left(), total = rest.reduce(function(s,it){ return s+it.sum; }, 0);
+    $('queue').textContent = money(total);
+    $('sub').textContent = rest.length ? 'к оплате, заявок: '+rest.length : 'очередь пуста';
+
+    // Фильтр показываем, только если есть обе линии.
+    var cnt = {RUN:0, BUILD:0};
+    rest.forEach(function(it){ cnt[it.line==='BUILD'?'BUILD':'RUN']++; });
+    var seg = $('seg'); seg.textContent = '';
+    seg.hidden = !(cnt.RUN && cnt.BUILD);
+    [['all','Все'],['RUN','Текущая'],['BUILD','Развитие']].forEach(function(f){
+      var b = el('button', null, f[1] + (f[0]==='all' ? '' : ' ' + cnt[f[0]]));
+      b.type = 'button'; b.setAttribute('aria-pressed', String(filter===f[0]));
+      b.onclick = function(){ filter = f[0]; render(); };
+      seg.appendChild(b);
+    });
+    if(seg.hidden) filter = 'all';
+
+    var list = $('list'); list.textContent = '';
+    var shown = D.items.filter(function(it){ return filter==='all' || (it.line==='BUILD'?'BUILD':'RUN')===filter; });
+    if(!shown.length){
+      list.hidden = true;
+      $('state').hidden = false; $('state').textContent = '';
+      $('state').appendChild(el('strong', null, 'Оплачивать нечего'));
+      $('state').appendChild(el('div', null, 'Новые одобренные заявки придут сообщением с кнопкой.'));
+      return;
+    }
+    list.hidden = false;
+    shown.forEach(function(it){ list.appendChild(item(it)); });
+  }
+
+  function item(it){
+    var box = el('div','item'); box.dataset.num = it.num;
+    if(it.done) return doneRow(box, it);
+
+    var row = el('button','row'); row.type = 'button';
+    row.setAttribute('aria-expanded', String(openNum===it.num));
+    row.appendChild(el('div','sup', it.sup));
+    row.appendChild(el('div','amt num', money(it.sum)));
+    row.appendChild(el('div','what', it.what));
+    var meta = el('div','meta num' + (it.overdue ? ' late' : ''));
+    if(it.urgent) meta.appendChild(el('span','tag','срочно'));
+    meta.appendChild(document.createTextNode(it.due ? (it.overdue ? 'просрочено, срок ' : 'срок ') + it.due.slice(0,5) : 'без срока'));
+    row.appendChild(meta);
+    row.onclick = function(){ openNum = (openNum===it.num) ? 0 : it.num; render(); };
+    box.appendChild(row);
+
+    if(openNum===it.num) box.appendChild(detail(it));
+    return box;
+  }
+
+  function doneRow(box, it){
+    var d = el('div','done');
+    var txt = el('div');
+    txt.appendChild(el('div','sup', money(it.sum) + ', ' + it.sup));
+    txt.appendChild(el('div','what', it.done.note));
+    d.appendChild(txt);
+    var cls = it.done.kind==='paid' ? '' : (it.done.kind==='refused' ? ' red' : ' grey');
+    var word = it.done.kind==='paid' ? 'ОПЛАЧЕНО' : (it.done.kind==='refused' ? 'ОТКАЗ' : 'НЕ В ОЧЕРЕДИ');
+    d.appendChild(el('span','stamp'+cls, word));
+    box.appendChild(d);
+    return box;
+  }
+
+  function accKey(it){ return (it.entity||'') + '|' + (it.cash==='Наличные' ? 'н' : 'б'); }
+
+  function detail(it){
+    var b = el('div','body');
+    var dis = !!busy[it.num];
+
+    var f = el('dl','facts');
+    function fact(k, v, cls){ f.appendChild(el('dt', null, k)); f.appendChild(el('dd', cls||null, v)); }
+    fact('Заявка', '№' + it.num + (it.line==='BUILD' ? ', развитие' : ''));
+    fact('Кто', [it.unit, it.author].filter(Boolean).join(', '));
+    if(it.full && it.full!==it.sum) fact('Одобрено', money(it.sum) + ' из ' + money(it.full));
+    fact('Способ', it.cash || '—');
+    fact('Юрлицо', it.entity || '—');
+    if(it.doc) fact('Документ', it.doc);
+    fact('Статья', it.art || (it.code ? it.code : 'без статьи — подтянется из поставщика, если там есть код'), (it.art||it.code) ? '' : 'miss');
+    b.appendChild(f);
+
+    if(refusing[it.num]) return refuseForm(b, it, dis);
+
+    // Счета: сначала того же юрлица и того же вида (нал/безнал). Счёт по умолчанию
+    // система не придумывает — только то, что казначей выбрал сам в таблице или здесь.
+    if(!choice[it.num] && lastAcc[accKey(it)]) choice[it.num] = lastAcc[accKey(it)];
+    var cashy = it.cash==='Наличные';
+    var accs = D.accounts.slice().sort(function(a,c){
+      function w(x){ return (x.entity===it.entity ? 0 : 2) + (x.cash===cashy ? 0 : 1); }
+      return w(a)-w(c);
+    });
+    b.appendChild(el('p','lbl','Со счёта'));
+    var wrap = el('div','accs'); wrap.setAttribute('role','radiogroup'); wrap.setAttribute('aria-label','Счёт списания');
+    accs.forEach(function(a){
+      var c = el('button','acc' + (a.entity===it.entity ? '' : ' other'), a.name);
+      c.type = 'button'; c.disabled = dis;
+      c.setAttribute('role','radio'); c.setAttribute('aria-checked', String(choice[it.num]===a.name));
+      c.onclick = function(){ choice[it.num] = a.name; errOf[it.num] = ''; render(); };
+      wrap.appendChild(c);
+    });
+    b.appendChild(wrap);
+
+    var sel = D.accounts.filter(function(a){ return a.name===choice[it.num]; })[0];
+    var h = el('p','hint');
+    if(sel && sel.entity && it.entity && sel.entity!==it.entity){
+      h.className = 'hint warn';
+      h.textContent = 'Счёт другого юрлица: ' + sel.entity + '. В учёт платёж встанет на него.';
+    } else if(sel && sel.entity){ h.textContent = 'В учёт: ' + sel.entity; }
+    b.appendChild(h);
+
+    var dr = el('label','date');
+    dr.appendChild(el('span','lbl','Дата оплаты'));
+    var inp = document.createElement('input');
+    inp.type = 'date'; inp.min = D.minDate; inp.max = D.today; inp.disabled = dis;
+    inp.value = dateOf[it.num] || D.today;
+    inp.onchange = function(){ dateOf[it.num] = inp.value; };
+    dr.appendChild(inp);
+    b.appendChild(dr);
+
+    var go = el('button','go', dis ? 'Отмечаю…' : 'Отметить оплату ' + money(it.sum));
+    go.type = 'button'; go.disabled = dis || !choice[it.num];
+    go.onclick = function(){ pay(it); };
+    b.appendChild(go);
+    if(!choice[it.num]) b.appendChild(el('p','hint','Выберите счёт, с которого ушли деньги.'));
+
+    var alt = el('button','alt','Отказ в оплате');
+    alt.type = 'button'; alt.disabled = dis;
+    alt.onclick = function(){ refusing[it.num] = true; errOf[it.num] = ''; render(); };
+    b.appendChild(alt);
+
+    if(errOf[it.num]) b.appendChild(el('div','err', errOf[it.num]));
+    return b;
+  }
+
+  function refuseForm(b, it, dis){
+    var wrap = el('div','refuse');
+    wrap.appendChild(el('p','lbl','Причина отказа — её получат заявитель и согласующий'));
+    var ta = document.createElement('textarea');
+    ta.maxLength = 300; ta.disabled = dis; ta.value = refuseText[it.num] || '';
+    ta.oninput = function(){ refuseText[it.num] = ta.value; };
+    wrap.appendChild(ta);
+    var pair = el('div','pair');
+    var back = el('button','back','Назад'); back.type = 'button'; back.disabled = dis;
+    back.onclick = function(){ refusing[it.num] = false; errOf[it.num] = ''; render(); };
+    var no = el('button','no', dis ? 'Записываю…' : 'Отказать'); no.type = 'button'; no.disabled = dis;
+    no.onclick = function(){ refuse(it, ta.value); };
+    pair.appendChild(back); pair.appendChild(no);
+    wrap.appendChild(pair);
+    if(errOf[it.num]) wrap.appendChild(el('div','err', errOf[it.num]));
+    b.appendChild(wrap);
+    setTimeout(function(){ if(!dis) ta.focus(); }, 0);
+    return b;
+  }
+
+  // ---------- Действия ----------
+  function settle(it, r, okDone){
+    busy[it.num] = false;
+    if(r.ok){ it.done = okDone; openNum = 0; haptic('success'); }
+    else if(r.gone){ it.done = {kind:'gone', note: r.err}; openNum = 0; haptic('warning'); }
+    else { errOf[it.num] = r.err; haptic('error'); }
+    render();
+  }
+
+  function pay(it){
+    var acc = choice[it.num];
+    if(!acc){ errOf[it.num] = 'Выберите счёт списания.'; render(); return; }
+    var date = dateOf[it.num] || D.today;
+    var sel = D.accounts.filter(function(a){ return a.name===acc; })[0];
+    var q = '№' + it.num + ', ' + short(it.sup, 40) + '\n' + money(it.sum) + ' со счёта «' + short(acc, 40) + '»' +
+      (date!==D.today ? '\nдатой ' + ruDate(date) : '') +
+      (sel && sel.entity && it.entity && sel.entity!==it.entity ? '\nСчёт другого юрлица.' : '') +
+      '\n\nОтметить оплату?';
+    ask(q).then(function(ok){
+      if(!ok) return;
+      busy[it.num] = true; errOf[it.num] = ''; render();
+      api('pay', {num:it.num, sum:it.sum, acc:acc, date:date}).then(function(r){
+        if(r.ok) lastAcc[accKey(it)] = acc;
+        settle(it, r, {kind:'paid', note: (r.date||ruDate(date)) + ', ' + acc});
+      });
+    });
+  }
+
+  function refuse(it, text){
+    var reason = String(text||'').trim();
+    if(reason.length < 3){ errOf[it.num] = 'Напишите причину хотя бы парой слов.'; render(); return; }
+    ask('Отказать в оплате №' + it.num + '?\nЗаявитель и согласующий получат причину.').then(function(ok){
+      if(!ok) return;
+      busy[it.num] = true; errOf[it.num] = ''; render();
+      api('refuse', {num:it.num, reason:reason}).then(function(r){
+        settle(it, r, {kind:'refused', note: short(reason, 80)});
+      });
+    });
+  }
+
+  $('reload').onclick = load;
+  load();
+})();
+</script>
+</body>
+</html>
