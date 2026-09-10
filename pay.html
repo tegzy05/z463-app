@@ -35,6 +35,8 @@
     :root{ --sep: color-mix(in srgb, var(--hint) 28%, transparent); }
   }
   *{ box-sizing:border-box; }
+  /* Атрибут hidden должен побеждать display:flex у блоков — иначе скрытое остаётся на экране. */
+  [hidden]{ display:none !important; }
   html,body{ margin:0; background:var(--bg2); color:var(--tx);
     font:15px/1.4 -apple-system, "SF Pro Text", Roboto, "Segoe UI", system-ui, sans-serif;
     -webkit-text-size-adjust:100%; }
@@ -51,6 +53,25 @@
   .reload{ background:none; border:0; color:var(--acc); padding:6px 2px; cursor:pointer; white-space:nowrap; }
   .note{ background:var(--bg); border-radius:var(--r-ctl); padding:10px 12px; margin:0 0 10px; font-size:14px; }
   .note.warn{ color:var(--red); }
+
+  /* Вкладки: очередь / история */
+  .tabs{ display:flex; gap:22px; padding:0 4px; margin:0 0 12px; border-bottom:1px solid var(--sep); }
+  .tabs button{ background:none; border:0; border-bottom:2px solid transparent; margin-bottom:-1px;
+    padding:8px 0; cursor:pointer; color:var(--hint); font-weight:600; }
+  .tabs button[aria-pressed="true"]{ color:var(--tx); border-bottom-color:var(--acc); }
+
+  /* История */
+  .day{ margin-bottom:14px; }
+  .dayhead{ display:flex; justify-content:space-between; align-items:baseline; padding:0 4px 6px; }
+  .dayhead b{ font-size:15px; }
+  .dayhead span{ font-weight:650; }
+  .byacc{ background:var(--bg); border-radius:var(--r-group); padding:10px 14px; margin-bottom:6px; }
+  .byacc .lbl{ margin:0 0 4px; }
+  .accline{ display:flex; justify-content:space-between; gap:12px; font-size:14px; padding:2px 0; }
+  .accline span:first-child{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hrow{ display:grid; grid-template-columns:1fr auto; gap:1px 12px; padding:10px 14px; }
+  .hrow + .hrow{ border-top:1px solid var(--sep); }
+  .hrow .sub2{ font-size:13px; color:var(--hint); grid-column:1 / -1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
   /* Фильтр линий */
   .seg{ display:flex; background:var(--bg); border-radius:var(--r-ctl); padding:3px; margin-bottom:12px; }
@@ -124,7 +145,12 @@
   </div>
   <button class="reload" id="reload" type="button">Обновить</button>
 </div>
+<div class="tabs" id="tabs" role="group" aria-label="Раздел" hidden>
+  <button type="button" id="tabQ" aria-pressed="true">К оплате</button>
+  <button type="button" id="tabH" aria-pressed="false">Оплачено</button>
+</div>
 <div id="notes"></div>
+<div id="hist" hidden></div>
 <div class="seg" id="seg" role="group" aria-label="Линия" hidden></div>
 <div class="list" id="list" hidden></div>
 <div class="state" id="state"><strong>Загружаю очередь…</strong></div>
@@ -146,6 +172,7 @@
 
   var D = null;            // ответ payInit
   var filter = 'all';
+  var tab = 'queue';       // queue | history
   var openNum = 0;
   var choice = {};         // num → счёт
   var dateOf = {};         // num → yyyy-mm-dd
@@ -191,7 +218,7 @@
   }
 
   function showState(title, text, btn){
-    $('top').hidden = !D; $('seg').hidden = true; $('list').hidden = true;
+    $('top').hidden = !D; $('seg').hidden = true; $('list').hidden = true; $('hist').hidden = true; $('tabs').hidden = !D;
     var s = $('state'); s.hidden = false; s.textContent = '';
     s.appendChild(el('strong', null, title));
     if(text) s.appendChild(el('div', null, text));
@@ -237,12 +264,20 @@
   function render(){
     $('state').hidden = true;
     $('top').hidden = false;
+    $('tabs').hidden = false;
+    $('tabQ').setAttribute('aria-pressed', String(tab==='queue'));
+    $('tabH').setAttribute('aria-pressed', String(tab==='history'));
+    $('tabQ').textContent = 'К оплате' + (left().length ? ' ' + left().length : '');
+    $('notes').hidden = (tab!=='queue');
     var who = D.name + (D.backup ? ', замещение казначея' : ', казначей');
     $('who').textContent = who;
 
     var rest = left(), total = rest.reduce(function(s,it){ return s+it.sum; }, 0);
     $('queue').textContent = money(total);
     $('sub').textContent = rest.length ? 'к оплате, заявок: '+rest.length : 'очередь пуста';
+    // Шапка общая для обеих вкладок — дальше разводим.
+    if(tab==='history'){ $('seg').hidden = true; $('list').hidden = true; renderHistory(); return; }
+    $('hist').hidden = true;
 
     // Фильтр показываем, только если есть обе линии.
     var cnt = {RUN:0, BUILD:0};
@@ -393,6 +428,66 @@
     return b;
   }
 
+  // ---------- История ----------
+  function dayName(iso){
+    if(iso===D.today) return 'Сегодня';
+    var t = new Date(D.today+'T12:00:00'); t.setDate(t.getDate()-1);
+    var y = t.getFullYear()+'-'+String(t.getMonth()+1).padStart(2,'0')+'-'+String(t.getDate()).padStart(2,'0');
+    if(iso===y) return 'Вчера';
+    return ruDate(iso).slice(0,5);
+  }
+  function renderHistory(){
+    var h = $('hist'); h.hidden = false; h.textContent = '';
+    var paid = (D.paid||[]).slice();
+    if(!paid.length){
+      var st = el('div','state');
+      st.appendChild(el('strong', null, 'За '+(D.historyDays||7)+' дней оплат нет'));
+      st.appendChild(el('div', null, 'Здесь появится всё, что отмечено оплаченным — из Telegram и из таблицы.'));
+      h.appendChild(st); return;
+    }
+    // По дням; внутри дня — итог по каждому счёту: его сверяют с приложением банка.
+    var days = [], byDay = {};
+    paid.forEach(function(x){
+      if(!byDay[x.iso]){ byDay[x.iso] = []; days.push(x.iso); }
+      byDay[x.iso].push(x);
+    });
+    days.sort().reverse();
+    days.forEach(function(iso){
+      var rows = byDay[iso], total = 0, acc = {}, order = [];
+      rows.forEach(function(x){
+        total += x.sum;
+        if(!(x.acc in acc)){ acc[x.acc] = 0; order.push(x.acc); }
+        acc[x.acc] += x.sum;
+      });
+      var day = el('section','day');
+      var head = el('div','dayhead');
+      head.appendChild(el('b', null, dayName(iso)));
+      head.appendChild(el('span','num', money(total)));
+      day.appendChild(head);
+
+      var ba = el('div','byacc');
+      ba.appendChild(el('p','lbl','По счетам'));
+      order.sort(function(a,b){ return acc[b]-acc[a]; }).forEach(function(a){
+        var l = el('div','accline num');
+        l.appendChild(el('span', null, a));
+        l.appendChild(el('span', null, money(acc[a])));
+        ba.appendChild(l);
+      });
+      if(order.length>1) day.appendChild(ba);   // один счёт — итог дня и так в заголовке
+
+      var list = el('div','list');
+      rows.forEach(function(x){
+        var r = el('div','hrow');
+        r.appendChild(el('div','sup', x.sup));
+        r.appendChild(el('div','amt num', money(x.sum)));
+        r.appendChild(el('div','sub2', '№'+x.num+', '+x.acc+(x.what ? ', '+x.what : '')));
+        list.appendChild(r);
+      });
+      day.appendChild(list);
+      h.appendChild(day);
+    });
+  }
+
   // ---------- Действия ----------
   function settle(it, r, okDone){
     busy[it.num] = false;
@@ -415,7 +510,11 @@
       if(!ok) return;
       busy[it.num] = true; errOf[it.num] = ''; render();
       api('pay', {num:it.num, sum:it.sum, acc:acc, date:date}).then(function(r){
-        if(r.ok) lastAcc[accKey(it)] = acc;
+        if(r.ok){
+          lastAcc[accKey(it)] = acc;
+          (D.paid = D.paid || []).unshift({num:it.num, sup:it.sup, what:it.what, sum:it.sum, acc:acc,
+            line:it.line, iso:r.iso || date, date:r.date || ruDate(date)});
+        }
         settle(it, r, {kind:'paid', note: (r.date||ruDate(date)) + ', ' + acc});
       });
     });
@@ -434,6 +533,8 @@
   }
 
   $('reload').onclick = load;
+  $('tabQ').onclick = function(){ tab = 'queue'; render(); };
+  $('tabH').onclick = function(){ tab = 'history'; render(); window.scrollTo(0,0); };
   load();
 })();
 </script>
