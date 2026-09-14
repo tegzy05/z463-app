@@ -101,6 +101,7 @@
   .acc{ border:1px solid var(--sep); background:var(--bg); border-radius:999px; padding:7px 12px; cursor:pointer; font-size:14px; }
   .acc[aria-checked="true"]{ border-color:var(--acc); background:var(--acc); color:var(--acc-tx); }
   .acc.other{ color:var(--hint); }
+  .acc.co::before{ content:'🏛 '; }
   .acc.other[aria-checked="true"]{ color:var(--acc-tx); }
   .hint{ font-size:13px; color:var(--hint); min-height:1em; margin:2px 0 12px; }
   .hint.warn{ color:var(--red); }
@@ -120,6 +121,7 @@
   .go{ width:100%; border:0; border-radius:var(--r-ctl); padding:13px; background:var(--acc); color:var(--acc-tx);
     font-weight:600; cursor:pointer; }
   .go:disabled{ opacity:.45; cursor:default; }
+  .go.route{ background:var(--bg2); color:var(--tx); }
   .alt{ display:block; margin:10px auto 0; background:none; border:0; color:var(--red); padding:6px; cursor:pointer; font-size:14px; }
   .refuse textarea{ width:100%; min-height:72px; font:inherit; color:var(--tx); background:var(--bg2); border:0;
     border-radius:var(--r-ctl); padding:10px; resize:vertical; margin-bottom:10px; }
@@ -291,7 +293,8 @@
     $('tabH').setAttribute('aria-pressed', String(tab==='history'));
     $('tabQ').textContent = 'К оплате' + (left().length ? ' ' + left().length : '');
     $('notes').hidden = (tab!=='queue');
-    var who = D.name + (D.backup ? ', замещение казначея' : ', казначей');
+    var who = D.name + (D.backup ? ', замещение казначея'
+      : (D.role==='payer2' ? ', счета компании' : ', казначей'));
     $('who').textContent = who;
 
     var rest = left(), total = rest.reduce(function(s,it){ return s+it.sum; }, 0);
@@ -320,7 +323,9 @@
       list.hidden = true;
       $('state').hidden = false; $('state').textContent = '';
       $('state').appendChild(el('strong', null, 'Оплачивать нечего'));
-      $('state').appendChild(el('div', null, 'Новые одобренные заявки придут сообщением с кнопкой.'));
+      $('state').appendChild(el('div', null, D.role==='payer2'
+        ? 'Платежи со счетов компании придут сообщением с кнопкой.'
+        : 'Новые одобренные заявки придут сообщением с кнопкой.'));
       return;
     }
     list.hidden = false;
@@ -353,8 +358,8 @@
     txt.appendChild(el('div','sup', money(it.sum) + ', ' + it.sup));
     txt.appendChild(el('div','what', it.done.note));
     d.appendChild(txt);
-    var cls = it.done.kind==='paid' ? '' : (it.done.kind==='refused' ? ' red' : ' grey');
-    var word = it.done.kind==='paid' ? 'ОПЛАЧЕНО' : (it.done.kind==='refused' ? 'ОТКАЗ' : 'НЕ В ОЧЕРЕДИ');
+    var K = {paid:['','ОПЛАЧЕНО'], refused:[' red','ОТКАЗ'], routed:[' grey','ПЕРЕДАНО'], gone:[' grey','НЕ В ОЧЕРЕДИ']};
+    var k = K[it.done.kind] || K.gone, cls = k[0], word = k[1];
     d.appendChild(el('span','stamp'+cls, word));
     box.appendChild(d);
     return box;
@@ -423,7 +428,7 @@
     b.appendChild(el('p','lbl','Со счёта'));
     var wrap = el('div','accs'); wrap.setAttribute('role','radiogroup'); wrap.setAttribute('aria-label','Счёт списания');
     accs.forEach(function(a){
-      var c = el('button','acc' + (a.entity===it.entity ? '' : ' other'), a.name);
+      var c = el('button','acc' + (a.entity===it.entity ? '' : ' other') + (a.company && D.role!=='payer2' ? ' co' : ''), a.name);
       c.type = 'button'; c.disabled = dis;
       c.setAttribute('role','radio'); c.setAttribute('aria-checked', String(choice[it.num]===a.name));
       c.onclick = function(){ choice[it.num] = a.name; errOf[it.num] = ''; render(); };
@@ -432,12 +437,31 @@
     b.appendChild(wrap);
 
     var sel = D.accounts.filter(function(a){ return a.name===choice[it.num]; })[0];
+    var route = !!(sel && sel.company && D.role!=='payer2');   // Лаура по счетам компании не платит
     var h = el('p','hint');
-    if(sel && sel.entity && it.entity && sel.entity!==it.entity){
+    if(route){
+      h.textContent = it.ownerOk
+        ? 'Счёт компании — платит ' + D.payer2Name + '. ' + D.ownerName + ' эту заявку уже одобрил, второй раз не нужно.'
+        : 'Счёт компании — платит ' + D.payer2Name + '. Сначала нужно согласие: одобрит ' + D.ownerName + ' — и заявку сразу получит ' + D.payer2Name + '.';
+    } else if(sel && sel.entity && it.entity && sel.entity!==it.entity){
       h.className = 'hint warn';
       h.textContent = 'Счёт другого юрлица: ' + sel.entity + '. В учёт платёж встанет на него.';
     } else if(sel && sel.entity){ h.textContent = 'В учёт: ' + sel.entity; }
     b.appendChild(h);
+
+    if(route){
+      var rgo = el('button','go route', dis ? 'Отправляю…' :
+        (it.ownerOk ? 'На оплату — ' + D.payer2Name : 'На согласование — ' + D.ownerName));
+      rgo.type = 'button'; rgo.disabled = dis;
+      rgo.onclick = function(){ routeIt(it, sel.name); };
+      b.appendChild(rgo);
+      var alt2 = el('button','alt','Отказ в оплате');
+      alt2.type = 'button'; alt2.disabled = dis;
+      alt2.onclick = function(){ refusing[it.num] = true; errOf[it.num] = ''; render(); };
+      b.appendChild(alt2);
+      if(errOf[it.num]) b.appendChild(el('div','err', errOf[it.num]));
+      return b;
+    }
 
     var dr = el('label','date');
     dr.appendChild(el('span','lbl','Дата оплаты'));
@@ -448,15 +472,30 @@
     dr.appendChild(inp);
     b.appendChild(dr);
 
-    if(it.editable && over && cur <= it.maxTo){
+    var overMax = it.editable && cur > it.maxTo;
+    if(it.editable && (over || overMax)){
       var wy = el('div','why');
-      wy.appendChild(el('p','lbl','Почему больше — уйдёт согласующему'));
+      wy.appendChild(el('p','lbl', overMax ? 'Из-за чего сумма выросла — это увидит согласующий'
+                                           : 'Почему больше — уйдёт согласующему'));
       var wt = document.createElement('textarea');
       wt.maxLength = 200; wt.disabled = dis; wt.value = whyOf[it.num] || '';
       wt.placeholder = 'например: счёт за август выше из-за генератора';
       wt.oninput = function(){ whyOf[it.num] = wt.value; updateFact(it); };
       wy.appendChild(wt);
       b.appendChild(wy);
+    }
+
+    if(overMax){
+      var rz = el('button','go route', dis ? 'Отправляю…' : 'На согласование — ' + it.approver);
+      rz.type = 'button'; rz.id = 'go'+it.num;
+      rz.disabled = dis || String(whyOf[it.num]||'').trim().length < 3;
+      rz.onclick = function(){ raise(it, cur); };
+      b.appendChild(rz);
+      var rh = el('p','hint', String(whyOf[it.num]||'').trim().length < 3
+        ? 'Без причины согласующий не поймёт, что одобряет.' : '');
+      rh.id = 'rh'+it.num; b.appendChild(rh);
+      if(errOf[it.num]) b.appendChild(el('div','err', errOf[it.num]));
+      return b;
     }
 
     var go = el('button','go', dis ? 'Отмечаю…' : 'Отметить оплату ' + money(cur));
@@ -512,7 +551,7 @@
   function factHint(it){
     var cur = factSum(it), d = cur - it.sum;
     if(!cur) return {cls:'hint', txt:'Введите сумму из счёта.'};
-    if(cur > it.maxTo) return {cls:'hint warn', txt:'Больше ' + money(it.maxTo) + ' провести нельзя — нужно решение согласующего.'};
+    if(cur > it.maxTo) return {cls:'hint warn', txt:'Больше ' + money(it.maxTo) + ' казначей не проводит. Решает: ' + it.approver + '.'};
     if(d > 0){
       var txt = 'Больше на ' + money(d) + (it.sum ? ' (+' + Math.round(d/it.sum*100) + '%)' : '');
       if(cur > it.freeTo) return {cls:'hint warn', txt: txt + '. Согласующий и владелец получат сообщение.'};
@@ -524,12 +563,18 @@
   function updateFact(it){
     var cur = factSum(it), h = $('fh'+it.num), go = $('go'+it.num);
     if(h){ var fhx = factHint(it); h.className = fhx.cls; h.textContent = fhx.txt; }
-    if(go && !busy[it.num]){
-      go.textContent = 'Отметить оплату ' + money(cur);
-      go.disabled = !choice[it.num] || !payable(it);
-    }
+    var isRaise = go && go.classList.contains('route');
+    if(go && !busy[it.num] && (cur > it.maxTo)===!!isRaise){
+      if(isRaise){
+        var need = String(whyOf[it.num]||'').trim().length < 3;
+        go.disabled = need;
+        var rhx = $('rh'+it.num);
+        if(rhx) rhx.textContent = need ? 'Без причины согласующий не поймёт, что одобряет.' : '';
+      }
+      else { go.textContent = 'Отметить оплату ' + money(cur); go.disabled = !choice[it.num] || !payable(it); }
+    } else if(go) render();   // кнопка сменила назначение — пересобираем
     // Появление или снятие поля причины меняет разметку — тут без перерисовки никак.
-    var needWhy = it.editable && cur > it.freeTo && cur <= it.maxTo;
+    var needWhy = it.editable && cur > it.freeTo;   // выше потолка причина тоже нужна
     var hasWhy = !!document.querySelector('[data-num="'+it.num+'"] .why');
     if(needWhy!==hasWhy) render();
   }
@@ -628,6 +673,34 @@
         }
         if(r.needWhy) whyOf[it.num] = whyOf[it.num] || '';
         settle(it, r, {kind:'paid', note: (r.date||ruDate(date)) + ', ' + acc});
+      });
+    });
+  }
+
+  function raise(it, cur){
+    var why = String(whyOf[it.num]||'').trim();
+    if(why.length < 3){ errOf[it.num] = 'Напишите причину.'; render(); return; }
+    ask('№' + it.num + ': счёт на ' + money(cur) + ' вместо ' + money(it.sum) + '.\n' +
+        'Решение примет: ' + it.approver + '.\n\nОтправить?').then(function(ok){
+      if(!ok) return;
+      busy[it.num] = true; errOf[it.num] = ''; render();
+      api('raise', {num:it.num, sum:it.sum, factSum:cur, why:why}).then(function(r){
+        if(r.stale) r.err += ' Нажмите «Обновить» вверху.';
+        settle(it, r, {kind:'routed', note:'на согласование: ' + (r.to||'') + ', ' + money(cur)});
+      });
+    });
+  }
+
+  function routeIt(it, acc){
+    var q = it.ownerOk
+      ? '№' + it.num + ', счёт «' + short(acc, 40) + '».\nОплатит: ' + D.payer2Name + '.\n\nПередать?'
+      : '№' + it.num + ': оплата со счёта компании.\nРешение примет: ' + D.ownerName + '.\n\nОтправить?';
+    ask(q).then(function(ok){
+      if(!ok) return;
+      busy[it.num] = true; errOf[it.num] = ''; render();
+      api('route', {num:it.num, sum:it.sum, acc:acc}).then(function(r){
+        if(r.stale) r.err += ' Нажмите «Обновить» вверху.';
+        settle(it, r, {kind:'routed', note: (r.direct ? 'передано: ' : 'на согласование: ') + (r.to||'')});
       });
     });
   }
