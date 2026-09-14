@@ -106,6 +106,17 @@
   .hint.warn{ color:var(--red); }
   .date{ display:flex; align-items:center; gap:10px; margin-bottom:14px; }
   .date input{ font:inherit; color:var(--tx); background:var(--bg2); border:0; border-radius:var(--r-ctl); padding:8px 10px; }
+  /* Сумма по факту */
+  .fact{ display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .fact input{ flex:1; min-width:0; font:inherit; font-weight:650; font-size:17px; color:var(--tx);
+    background:var(--bg2); border:1px solid transparent; border-radius:var(--r-ctl); padding:9px 11px;
+    font-variant-numeric:tabular-nums; }
+  .fact input:focus{ border-color:var(--acc); }
+  .fact input.bad{ border-color:var(--red); }
+  .fact .cur{ color:var(--hint); }
+  .fact button{ background:none; border:0; color:var(--acc); padding:6px 2px; cursor:pointer; font-size:14px; }
+  .why textarea{ width:100%; min-height:56px; font:inherit; color:var(--tx); background:var(--bg2); border:0;
+    border-radius:var(--r-ctl); padding:10px; resize:vertical; margin-bottom:6px; }
   .go{ width:100%; border:0; border-radius:var(--r-ctl); padding:13px; background:var(--acc); color:var(--acc-tx);
     font-weight:600; cursor:pointer; }
   .go:disabled{ opacity:.45; cursor:default; }
@@ -179,6 +190,8 @@
   var refusing = {};       // num → true, если открыта форма отказа
   var refuseText = {};     // num → набранная причина (переживает перерисовку)
   var busy = {};           // num → true во время запроса
+  var factOf = {};         // num → фактическая сумма (строка из поля)
+  var whyOf = {};          // num → причина превышения
   var errOf = {};          // num → текст ошибки
   var lastAcc = {};        // «юрлицо|нал» → счёт, выбранный в этой сессии
 
@@ -190,6 +203,15 @@
     return n;
   }
   function money(n){ return (Number(n)||0).toLocaleString('ru-RU') + ' ₸'; }
+  function digits(v){ return String(v==null?'':v).replace(/[^\d]/g,''); }
+  /** 300000 → «300 000»: длинные суммы читаются с разрядами, иначе легко ошибиться нулём. */
+  function group(d){ return String(d).replace(/\B(?=(\d{3})+(?!\d))/g,'\u00a0'); }
+  /** Сумма, которую сейчас платим: поле факта, если заполнено, иначе то, что одобрено. */
+  function factSum(it){
+    if(!it.editable) return it.sum;
+    var d = digits(factOf[it.num]);
+    return d==='' ? it.sum : Number(d);
+  }
   function ruDate(iso){ var p = String(iso).split('-'); return p.length===3 ? p[2]+'.'+p[1]+'.'+p[0] : iso; }
   function short(s, n){ s = String(s||''); return s.length>n ? s.slice(0,n-1)+'…' : s; }
   function haptic(kind){ try{ tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(kind); }catch(e){} }
@@ -312,7 +334,7 @@
     var row = el('button','row'); row.type = 'button';
     row.setAttribute('aria-expanded', String(openNum===it.num));
     row.appendChild(el('div','sup', it.sup));
-    row.appendChild(el('div','amt num', money(it.sum)));
+    row.appendChild(el('div','amt num', (it.editable && !it.sum) ? 'по счёту' : money(it.sum)));
     row.appendChild(el('div','what', it.what));
     var meta = el('div','meta num' + (it.overdue ? ' late' : ''));
     if(it.urgent) meta.appendChild(el('span','tag','срочно'));
@@ -357,6 +379,39 @@
 
     if(refusing[it.num]) return refuseForm(b, it, dis);
 
+    var cur = factSum(it), over = it.editable && cur > it.freeTo;
+    if(it.editable){
+      b.appendChild(el('p','lbl', it.sum ? 'Сумма по счёту — можно исправить' : 'Сумма по счёту'));
+      var fr = el('div','fact');
+      var fi = document.createElement('input');
+      fi.type = 'text'; fi.inputMode = 'numeric'; fi.disabled = dis; fi.maxLength = 12;
+      fi.setAttribute('aria-label','Фактическая сумма');
+      fi.placeholder = it.sum ? group(it.sum) : 'введите сумму';
+      fi.value = group(factOf[it.num]!==undefined ? factOf[it.num] : (it.sum ? String(it.sum) : ''));
+      if(cur > it.maxTo) fi.className = 'bad';
+      fi.oninput = function(){
+        // Курсор держим по числу цифр слева от него: пробелы-разделители
+        // добавляются заново на каждый ввод и иначе уводили бы каретку.
+        var before = digits(fi.value.slice(0, fi.selectionStart||0)).length;
+        var d = digits(fi.value);
+        factOf[it.num] = d;
+        fi.value = group(d);
+        var pos = 0, seen = 0;
+        while(pos < fi.value.length && seen < before){ if(/\d/.test(fi.value[pos])) seen++; pos++; }
+        try{ fi.setSelectionRange(pos, pos); }catch(e){}
+        updateFact(it);
+      };
+      fr.appendChild(fi);
+      fr.appendChild(el('span','cur','₸'));
+      if(it.sum && cur!==it.sum){
+        var undo = el('button', null, 'сброс'); undo.type = 'button'; undo.disabled = dis;
+        undo.onclick = function(){ factOf[it.num] = String(it.sum); whyOf[it.num] = ''; render(); };
+        fr.appendChild(undo);
+      }
+      b.appendChild(fr);
+      var fhi = factHint(it), fh = el('p', fhi.cls, fhi.txt); fh.id = 'fh'+it.num; b.appendChild(fh);
+    }
+
     // Счета: сначала того же юрлица и того же вида (нал/безнал). Счёт по умолчанию
     // система не придумывает — только то, что казначей выбрал сам в таблице или здесь.
     if(!choice[it.num] && lastAcc[accKey(it)]) choice[it.num] = lastAcc[accKey(it)];
@@ -393,8 +448,20 @@
     dr.appendChild(inp);
     b.appendChild(dr);
 
-    var go = el('button','go', dis ? 'Отмечаю…' : 'Отметить оплату ' + money(it.sum));
-    go.type = 'button'; go.disabled = dis || !choice[it.num];
+    if(it.editable && over && cur <= it.maxTo){
+      var wy = el('div','why');
+      wy.appendChild(el('p','lbl','Почему больше — уйдёт согласующему'));
+      var wt = document.createElement('textarea');
+      wt.maxLength = 200; wt.disabled = dis; wt.value = whyOf[it.num] || '';
+      wt.placeholder = 'например: счёт за август выше из-за генератора';
+      wt.oninput = function(){ whyOf[it.num] = wt.value; updateFact(it); };
+      wy.appendChild(wt);
+      b.appendChild(wy);
+    }
+
+    var go = el('button','go', dis ? 'Отмечаю…' : 'Отметить оплату ' + money(cur));
+    go.type = 'button'; go.id = 'go'+it.num;
+    go.disabled = dis || !choice[it.num] || !payable(it);
     go.onclick = function(){ pay(it); };
     b.appendChild(go);
     if(!choice[it.num]) b.appendChild(el('p','hint','Выберите счёт, с которого ушли деньги.'));
@@ -426,6 +493,45 @@
     b.appendChild(wrap);
     setTimeout(function(){ if(!dis) ta.focus(); }, 0);
     return b;
+  }
+
+  /** Можно ли нажимать «Отметить оплату» — те же правила, что и на сервере. */
+  function payable(it){
+    var cur = factSum(it);
+    if(!cur) return false;
+    if(!it.editable) return true;
+    if(cur > it.maxTo) return false;
+    if(cur > it.freeTo && String(whyOf[it.num]||'').trim().length < 3) return false;
+    return true;
+  }
+  /**
+   * Подсказка под полем суммы и состояние кнопки — без полной перерисовки:
+   * иначе поле теряет фокус на каждой цифре.
+   */
+  /** Подсказка под полем суммы: одна и та же при отрисовке и при вводе. */
+  function factHint(it){
+    var cur = factSum(it), d = cur - it.sum;
+    if(!cur) return {cls:'hint', txt:'Введите сумму из счёта.'};
+    if(cur > it.maxTo) return {cls:'hint warn', txt:'Больше ' + money(it.maxTo) + ' провести нельзя — нужно решение согласующего.'};
+    if(d > 0){
+      var txt = 'Больше на ' + money(d) + (it.sum ? ' (+' + Math.round(d/it.sum*100) + '%)' : '');
+      if(cur > it.freeTo) return {cls:'hint warn', txt: txt + '. Согласующий и владелец получат сообщение.'};
+      return {cls:'hint', txt:txt};
+    }
+    if(d < 0) return {cls:'hint', txt:'Меньше на ' + money(-d) + ' — в учёт пойдёт эта сумма.'};
+    return {cls:'hint', txt:''};
+  }
+  function updateFact(it){
+    var cur = factSum(it), h = $('fh'+it.num), go = $('go'+it.num);
+    if(h){ var fhx = factHint(it); h.className = fhx.cls; h.textContent = fhx.txt; }
+    if(go && !busy[it.num]){
+      go.textContent = 'Отметить оплату ' + money(cur);
+      go.disabled = !choice[it.num] || !payable(it);
+    }
+    // Появление или снятие поля причины меняет разметку — тут без перерисовки никак.
+    var needWhy = it.editable && cur > it.freeTo && cur <= it.maxTo;
+    var hasWhy = !!document.querySelector('[data-num="'+it.num+'"] .why');
+    if(needWhy!==hasWhy) render();
   }
 
   // ---------- История ----------
@@ -500,21 +606,27 @@
   function pay(it){
     var acc = choice[it.num];
     if(!acc){ errOf[it.num] = 'Выберите счёт списания.'; render(); return; }
+    var cur = factSum(it);
+    if(!payable(it)){ errOf[it.num] = 'Проверьте сумму.'; render(); return; }
     var date = dateOf[it.num] || D.today;
     var sel = D.accounts.filter(function(a){ return a.name===acc; })[0];
-    var q = '№' + it.num + ', ' + short(it.sup, 40) + '\n' + money(it.sum) + ' со счёта «' + short(acc, 40) + '»' +
+    var q = '№' + it.num + ', ' + short(it.sup, 40) + '\n' + money(cur) + ' со счёта «' + short(acc, 40) + '»' +
+      (cur!==it.sum ? (it.sum ? '\nСумма уточнена: было ' + money(it.sum) : '\nСумма по счёту') : '') +
       (date!==D.today ? '\nдатой ' + ruDate(date) : '') +
       (sel && sel.entity && it.entity && sel.entity!==it.entity ? '\nСчёт другого юрлица.' : '') +
       '\n\nОтметить оплату?';
     ask(q).then(function(ok){
       if(!ok) return;
       busy[it.num] = true; errOf[it.num] = ''; render();
-      api('pay', {num:it.num, sum:it.sum, acc:acc, date:date}).then(function(r){
+      api('pay', {num:it.num, sum:it.sum, acc:acc, date:date,
+        factSum: (cur!==it.sum ? cur : undefined), why: whyOf[it.num] || ''}).then(function(r){
         if(r.ok){
           lastAcc[accKey(it)] = acc;
+          it.sum = r.sum || cur;
           (D.paid = D.paid || []).unshift({num:it.num, sup:it.sup, what:it.what, sum:it.sum, acc:acc,
             line:it.line, iso:r.iso || date, date:r.date || ruDate(date)});
         }
+        if(r.needWhy) whyOf[it.num] = whyOf[it.num] || '';
         settle(it, r, {kind:'paid', note: (r.date||ruDate(date)) + ', ' + acc});
       });
     });
