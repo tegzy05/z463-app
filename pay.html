@@ -227,9 +227,9 @@
     });
   }
 
-  function api(action, data){
+  function apiOnce(action, data){
     var ctl = ('AbortController' in window) ? new AbortController() : null;
-    var t = ctl ? setTimeout(function(){ ctl.abort(); }, 30000) : null;
+    var t = ctl ? setTimeout(function(){ ctl.abort(); }, 25000) : null;
     // text/plain — без предварительного OPTIONS, на который Apps Script не отвечает.
     return fetch(API, {
       method:'POST', redirect:'follow',
@@ -237,8 +237,23 @@
       body: JSON.stringify({action:action, initData:(tg && tg.initData) || '', data:data||{}}),
       signal: ctl ? ctl.signal : undefined
     }).then(function(r){ return r.json(); })
-      .catch(function(){ return {ok:false, net:true, err:'Нет связи с сервером. Проверьте интернет и повторите — отметка не сделана.'}; })
       .finally(function(){ if(t) clearTimeout(t); });
+  }
+
+  // Повтор при срыве связи. Безопасен: сервер перед каждой отметкой смотрит
+  // текущий статус заявки, и уже оплаченную второй раз не проводит — вернёт
+  // «заявка №N уже оплачена». Поэтому повторить лучше, чем оставить человека
+  // гадать: платёж чаще всего прошёл, а ответ потерялся по дороге.
+  function api(action, data){
+    return apiOnce(action, data).catch(function(){
+      return new Promise(function(ok){ setTimeout(ok, 2000); })
+        .then(function(){ return apiOnce(action, data); })
+        .catch(function(){
+          return {ok:false, net:true,
+            err:'Ответ от сервера не пришёл. Отметка МОГЛА пройти — не повторяйте вслепую: '+
+                'нажмите «Обновить» вверху и посмотрите, ушла ли заявка из очереди.'};
+        });
+    });
   }
 
   function showState(title, text, btn){
