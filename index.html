@@ -6,7 +6,19 @@
 <title>Заявка на оплату</title>
 <!--
   ФИНЦЕНТР TruckStop Z-463 — экран подачи заявки (Telegram Mini App)
-  Версия 1.3 · 17.09.2026 · репозиторий z463-app
+  Версия 1.4 · 18.09.2026 · репозиторий z463-app
+
+  v1.4: ФОРМА ПОКАЗЫВАЕТСЯ СРАЗУ. Раньше всё поле было закрыто заставкой
+  «Загружаю…», пока не придёт ответ на init. А ответ идёт долго не по вине
+  сервера: Apps Script поднимает контейнер заново, если веб-приложение не
+  вызывали несколько минут, и первый вход после паузы стоит до 20 секунд.
+  Человек всё это время смотрел в пустой экран.
+  Теперь форма рисуется мгновенно: сумма, способ оплаты, линия и срочность
+  доступны с первой секунды. Ждёт только поле поставщика — там подпись
+  «загружаю список…» и ввод заблокирован, пока список не придёт. Кнопка
+  подачи тоже ждёт: отправлять заявку, не зная, кто её подаёт, нельзя.
+  Время не сократилось — сократилось ожидание, потому что его теперь есть
+  чем занять.
 
   v1.3: ЗАПРОС БОЛЬШЕ НЕ ВИСИТ И НЕ СДАЁТСЯ С ПЕРВОГО РАЗА.
   Было две беды. Первая: у fetch не стояло ограничения по времени, поэтому
@@ -35,6 +47,444 @@
   Он приходит параметром ?api= из кнопки бота, которую ставит функция
   НАСТРОИТЬ_MINIAPP. Причина: адрес живёт в Apps Script, а файл — на GitHub,
   и любое новое развёртывание расходило эти два места. Страница обращалась
+  по мёртвому адресу, браузер отдавал «Load failed», а чинить это мог только
+  человек с доступом к репозиторию. Теперь смена развёртывания — запуск одной
+  функции в таблице, GitHub трогать не нужно.
+  Резервный адрес ниже используется, только если параметра нет.
+
+  Оформление наследует тему Telegram: экран должен выглядеть частью
+  мессенджера, а не чужим сайтом.
+-->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg:      var(--tg-theme-bg-color, #ffffff);
+    --fg:      var(--tg-theme-text-color, #000000);
+    --muted:   var(--tg-theme-hint-color, #8b8b8b);
+    --card:    var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --accent:  var(--tg-theme-button-color, #2481cc);
+    --onAccent:var(--tg-theme-button-text-color, #ffffff);
+    --danger:  #d64545;
+    --line:    rgba(128,128,128,.22);
+  }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; padding:0; background:var(--bg); color:var(--fg); }
+  body{
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 12px 16px 120px;
+  }
+  h1{ font-size:20px; font-weight:600; margin:4px 0 2px; }
+  .who{ color:var(--muted); font-size:14px; margin-bottom:20px; }
+
+  label{ display:block; font-size:14px; color:var(--muted); margin:0 0 6px; }
+  .field{ margin-bottom:20px; }
+
+  input[type=text], input[type=tel], textarea{
+    width:100%; font:inherit; color:var(--fg); background:var(--card);
+    border:1px solid transparent; border-radius:12px; padding:13px 14px;
+    appearance:none;
+  }
+  input:focus, textarea:focus{ outline:none; border-color:var(--accent); }
+  textarea{ resize:none; min-height:76px; }
+
+  /* Сумма — единственный крупный элемент. Её проверяют и заявитель,
+     и согласующий, поэтому она должна читаться с вытянутой руки. */
+  #sum{ font-size:30px; font-weight:600; letter-spacing:-0.5px; padding:14px; }
+  .sumRow{ display:flex; align-items:baseline; gap:10px; }
+  .sumRow .cur{ font-size:20px; color:var(--muted); }
+
+  .opts{ display:flex; gap:10px; }
+  .opt{
+    flex:1; text-align:center; padding:13px 8px; border-radius:12px;
+    background:var(--card); border:1.5px solid transparent; cursor:pointer;
+    font-size:15px; user-select:none;
+  }
+  .opt[aria-pressed="true"]{ border-color:var(--accent); color:var(--accent); font-weight:600; }
+
+  .check{ display:flex; align-items:center; gap:12px; padding:13px 14px;
+          background:var(--card); border-radius:12px; cursor:pointer; }
+  .check input{ width:20px; height:20px; accent-color:var(--accent); margin:0; flex:none; }
+  .check span{ font-size:15px; }
+  .check small{ display:block; color:var(--muted); font-size:13px; }
+
+  .found{ margin-top:8px; border-radius:12px; overflow:hidden; background:var(--card); }
+  .found div{ padding:12px 14px; border-bottom:1px solid var(--line); cursor:pointer; font-size:15px; }
+  .found div:last-child{ border-bottom:none; }
+  .picked{ display:flex; align-items:center; justify-content:space-between; gap:12px;
+           background:var(--card); border-radius:12px; padding:13px 14px; }
+  .picked b{ font-weight:600; }
+  .picked button{ background:none; border:none; color:var(--accent); font:inherit;
+                  padding:0; cursor:pointer; flex:none; }
+
+  .submit{
+    position:fixed; left:0; right:0; bottom:0; padding:12px 16px 20px;
+    background:linear-gradient(to top, var(--bg) 72%, transparent);
+  }
+  .submit button{
+    width:100%; padding:16px; font:inherit; font-size:17px; font-weight:600;
+    background:var(--accent); color:var(--onAccent); border:none; border-radius:12px;
+    cursor:pointer;
+  }
+  .submit button[disabled]{ opacity:.45; }
+
+  .msg{ padding:14px; border-radius:12px; font-size:15px; margin-bottom:18px;
+        background:rgba(214,69,69,.13); color:var(--danger); }
+  .msg small{ display:block; margin-top:8px; color:var(--muted); font-size:13px; }
+  .hint{ color:var(--muted); font-size:13px; margin-top:6px; }
+  .hidden{ display:none !important; }
+
+  .done{ text-align:center; padding:56px 20px; }
+  .done .num{ font-size:40px; font-weight:600; margin:14px 0 6px; }
+  .done p{ color:var(--muted); margin:0 0 26px; }
+  .done button{ font:inherit; font-size:16px; padding:14px 30px; border:none;
+                border-radius:12px; background:var(--card); color:var(--fg); cursor:pointer; }
+</style>
+</head>
+<body>
+
+<div id="loading" class="who hidden">Загружаю…</div>
+
+<div id="blocked" class="hidden">
+  <div class="msg" id="blockedText"></div>
+</div>
+
+<div id="form">
+  <h1>Заявка на оплату</h1>
+  <div class="who" id="who"></div>
+
+  <div id="err" class="msg hidden"></div>
+
+  <div class="field">
+    <label for="supQ">Кому платим</label>
+    <div id="supPick">
+      <input type="text" id="supQ" placeholder="Загружаю список…" autocomplete="off" disabled>
+      <div class="found hidden" id="supFound"></div>
+      <div class="hint">Нет в списке? Введите название целиком и выберите «Добавить нового».</div>
+    </div>
+    <div class="picked hidden" id="supPicked">
+      <b id="supName"></b>
+      <button type="button" id="supClear">Изменить</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <label for="what">За что платим</label>
+    <textarea id="what" placeholder="Коротко, одной фразой"></textarea>
+  </div>
+
+  <div class="field">
+    <label for="sum">Сумма</label>
+    <div class="sumRow">
+      <input type="tel" id="sum" inputmode="numeric" placeholder="0">
+      <span class="cur">₸</span>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>Как платим</label>
+    <div class="opts" id="cashOpts">
+      <div class="opt" data-v="Безнал" aria-pressed="true">Безнал</div>
+      <div class="opt" data-v="Наличные" aria-pressed="false">Наличные</div>
+    </div>
+  </div>
+
+  <div class="field hidden" id="lineField">
+    <label>Линия</label>
+    <div class="opts" id="lineOpts">
+      <div class="opt" data-v="Текущая работа (RUN)" aria-pressed="true">Текущая работа</div>
+      <div class="opt" data-v="Развитие (BUILD)" aria-pressed="false">Развитие</div>
+    </div>
+  </div>
+
+  <div class="field hidden" id="cashboxField">
+    <label class="check">
+      <input type="checkbox" id="cashbox">
+      <span>Деньги уже выданы из кассы юнита
+        <small>Заявка уйдёт на подтверждение задним числом</small></span>
+    </label>
+  </div>
+
+  <div class="field">
+    <label class="check">
+      <input type="checkbox" id="urgent">
+      <span>Срочно
+        <small>Авария, штраф, простой. Уйдёт сразу Алуа и Аманкали</small></span>
+    </label>
+  </div>
+
+  <div class="field">
+    <label for="doc">Номер счёта или накладной</label>
+    <input type="text" id="doc" placeholder="Необязательно">
+    <div class="hint">Фото счёта отправьте боту сообщением сразу после подачи.</div>
+  </div>
+</div>
+
+<div class="submit" id="submitBar">
+  <button id="send">Подать заявку</button>
+</div>
+
+<div id="done" class="done hidden">
+  <div>Заявка принята</div>
+  <div class="num" id="doneNum"></div>
+  <p id="doneText"></p>
+  <button id="closeBtn">Закрыть</button>
+</div>
+
+<script>
+(function(){
+  // ---------- адрес сервера ----------
+  // Приходит из кнопки бота: .../?api=https://script.google.com/.../exec
+  // Резервный адрес — только на случай, если кнопку поставили без параметра
+  // (например, вручную через BotFather). Держать его в актуальном состоянии
+  // не обязательно: правильный путь — запустить НАСТРОИТЬ_MINIAPP в таблице.
+  var API_FALLBACK = 'ВСТАВЬТЕ_СЮДА_АДРЕС_РАЗВЁРТЫВАНИЯ';
+
+  var API_URL = (function(){
+    var q = '';
+    try{ q = new URLSearchParams(location.search).get('api') || ''; }catch(e){}
+    // Принимаем только адрес Apps Script: параметр приходит из URL, а
+    // отправлять туда подписанные данные кому попало нельзя.
+    return /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(q) ? q : API_FALLBACK;
+  })();
+
+  var tg = window.Telegram && window.Telegram.WebApp;
+  var initData = tg ? (tg.initData || '') : '';
+  if(tg){ tg.ready(); tg.expand(); }
+
+  var S = { suppliers:[], sup:'', isNew:false, cash:'Безнал', line:'', n1:50000, sending:false,
+            ready:false };   // ready — пришёл ли init: до него подавать нечего
+
+  function $(id){ return document.getElementById(id); }
+  function show(el,on){ el.classList[on?'remove':'add']('hidden'); }
+  function stop(html){
+    $('loading').classList.add('hidden');
+    // Форма теперь рисуется до ответа сервера, поэтому при отказе её надо
+    // убрать явно — иначе человек останется с полями, которые никуда не ведут.
+    show($('form'),false);
+    show($('submitBar'),false);
+    $('blockedText').innerHTML = html;
+    show($('blocked'),true);
+  }
+  function err(t){
+    var e=$('err');
+    if(!t){ show(e,false); return; }
+    e.textContent=t; show(e,true); e.scrollIntoView({block:'center'});
+  }
+
+  // Сорвавшийся fetch и отказ сервера — разные болезни с разным лечением,
+  // а браузер называет первую невнятно: «Load failed» на iPhone,
+  // «Failed to fetch» на Android. Переводим на язык действий.
+  function netHint(e){
+    var m = String((e && e.message) || e || '');
+    if(/load failed|failed to fetch|networkerror|network request failed/i.test(m)){
+      return 'Сервер не отвечает.<small>Адрес развёртывания недоступен: развёртывание удалено, '+
+             'архивировано или закрыто от анонимного доступа.<br><br>'+
+             'Азамату: запустите в таблице «⚙️ ФИНЦЕНТР → Проверка Mini App» — она покажет, '+
+             'что именно с адресом.</small>';
+    }
+    return 'Сервер ответил с ошибкой.<small>'+m.slice(0,200)+'</small>';
+  }
+
+  // Один заход с потолком по времени. Без него сорвавшийся обратный путь
+  // держит кнопку в «Отправляю…» столько, сколько решит система телефона, —
+  // на трассе это минуты, и человек всё это время не знает, что происходит.
+  function apiOnce(action, data, ms){
+    var ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = ctl ? setTimeout(function(){ try{ ctl.abort(); }catch(e){} }, ms) : 0;
+    function done(){ if(timer) clearTimeout(timer); }
+    return fetch(API_URL, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({action:action, initData:initData, data:data||{}}),
+      signal: ctl ? ctl.signal : undefined
+    }).then(function(r){ return r.text(); }).then(function(t){
+      done();
+      try{ return JSON.parse(t); }
+      catch(e){
+        throw new Error('Сервер ответил не по формату. Скорее всего, развёртывание не обновлено.');
+      }
+    }, function(e){
+      done();
+      throw e;
+    });
+  }
+
+  // Повтор при срыве. Безопасен по построению: сервер узнаёт повторную
+  // подачу по отпечатку и отдаёт номер уже созданной заявки, а не создаёт
+  // вторую. Один повтор, не больше: если и он не прошёл, дело не в случайной
+  // помехе, и дальше долбить бессмысленно.
+  function api(action, data){
+    return apiOnce(action, data, 25000).catch(function(){
+      return new Promise(function(ok){ setTimeout(ok, 2000); })
+        .then(function(){ return apiOnce(action, data, 25000); });
+    });
+  }
+
+  // ---------- запуск ----------
+  if(!initData){
+    stop('Эта страница открывается только из Telegram — кнопкой «Заявка» в чате с ботом.');
+    return;
+  }
+  if(!/^https:\/\/script\.google\.com\//.test(API_URL)){
+    stop('Кнопка настроена не до конца.<small>Адрес сервера не передан. '+
+         'Азамату: запустите в таблице «⚙️ ФИНЦЕНТР → Настроить Mini App».</small>');
+    return;
+  }
+
+  // Форма уже на экране. Ответ только снимает блокировки и подставляет
+  // то, что известно лишь серверу: имя, юнит, список поставщиков, порог мелочи.
+  $('send').disabled = true;
+  api('init').then(function(r){
+    if(!r || !r.ok){ stop((r && r.err) ? r.err : 'Не удалось открыть форму.'); return; }
+    S.ready = true;
+    S.suppliers = r.suppliers || [];
+    S.n1 = r.n1 || 50000;
+    $('who').textContent = r.name + (r.unit ? ' · ' + r.unit : '');
+    if(r.needsLine){ show($('lineField'),true); S.line = 'Текущая работа (RUN)'; }
+    $('supQ').disabled = false;
+    $('supQ').placeholder = 'Начните вводить название';
+    $('send').disabled = false;
+    toggleCashbox();          // порог мелочи приехал только сейчас
+  }).catch(function(e){
+    stop(netHint(e));
+  });
+
+  // ---------- поставщик ----------
+  var q = $('supQ'), found = $('supFound');
+
+  q.addEventListener('input', function(){
+    var v = q.value.trim().toLowerCase();
+    found.innerHTML = '';
+    if(v.length < 2){ show(found,false); return; }
+
+    S.suppliers.filter(function(n){
+      return n.toLowerCase().indexOf(v) > -1;
+    }).slice(0,8).forEach(function(n){
+      var d = document.createElement('div');
+      d.textContent = n;
+      d.addEventListener('click', function(){ pick(n,false); });
+      found.appendChild(d);
+    });
+
+    // Новый поставщик — не «ничего не найдено», а действие. Показываем
+    // всегда: совпадение по подстроке не значит, что нужный там есть.
+    var add = document.createElement('div');
+    var span = document.createElement('span');
+    span.style.color = 'var(--accent)';
+    span.textContent = 'Добавить нового: ' + q.value.trim();
+    add.appendChild(span);
+    add.addEventListener('click', function(){ pick(q.value.trim(), true); });
+    found.appendChild(add);
+
+    show(found,true);
+  });
+
+  function pick(name, isNew){
+    if(!name) return;
+    S.sup = name; S.isNew = isNew;
+    $('supName').textContent = name + (isNew ? ' — новый' : '');
+    show($('supPick'),false);
+    show($('supPicked'),true);
+    err('');
+  }
+
+  $('supClear').addEventListener('click', function(){
+    S.sup=''; S.isNew=false; q.value='';
+    found.innerHTML=''; show(found,false);
+    show($('supPicked'),false);
+    show($('supPick'),true);
+    q.focus();
+  });
+
+  // ---------- сумма ----------
+  var sumEl = $('sum');
+  sumEl.addEventListener('input', function(){
+    var d = sumEl.value.replace(/[^\d]/g,'');
+    sumEl.value = d ? Number(d).toLocaleString('ru-RU').replace(/,/g,' ') : '';
+    toggleCashbox();
+  });
+  function sumVal(){ return Number(sumEl.value.replace(/[^\d]/g,'')) || 0; }
+
+  // ---------- переключатели ----------
+  function group(el, onPick){
+    el.addEventListener('click', function(ev){
+      var t = ev.target.closest('.opt');
+      if(!t) return;
+      Array.prototype.forEach.call(el.children, function(c){
+        c.setAttribute('aria-pressed', String(c === t));
+      });
+      onPick(t.getAttribute('data-v'));
+    });
+  }
+  group($('cashOpts'), function(v){ S.cash = v; toggleCashbox(); });
+  group($('lineOpts'), function(v){ S.line = v; });
+
+  // «Уже выдано из кассы» имеет смысл только для мелкой налички —
+  // в остальных случаях вопрос лишний и только путает.
+  function toggleCashbox(){
+    var on = (S.cash === 'Наличные' && sumVal() > 0 && sumVal() <= S.n1);
+    show($('cashboxField'), on);
+    if(!on) $('cashbox').checked = false;
+  }
+
+  // ---------- отправка ----------
+  $('send').addEventListener('click', function(){
+    if(S.sending) return;
+    err('');
+
+    if(!S.ready){ err('Список ещё загружается — секунду.'); return; }
+    if(!S.sup){ err('Выберите поставщика'); return; }
+    if(!$('what').value.trim()){ err('Заполните, за что платим'); return; }
+    if(sumVal() <= 0){ err('Укажите сумму'); return; }
+
+    S.sending = true;
+    $('send').disabled = true;
+    $('send').textContent = 'Отправляю…';
+
+    api('submit',{
+      sup: S.sup,
+      what: $('what').value.trim(),
+      sum: String(sumVal()),
+      cash: S.cash,
+      line: S.line,
+      urgent: $('urgent').checked,
+      paidFromCash: $('cashbox').checked,
+      doc: $('doc').value.trim()
+    }).then(function(r){
+      S.sending = false;
+      if(!r || !r.ok){
+        $('send').disabled = false;
+        $('send').textContent = 'Подать заявку';
+        err((r && r.err) ? r.err : 'Заявка не создана. Попробуйте ещё раз.');
+        return;
+      }
+      show($('form'),false);
+      show($('submitBar'),false);
+      $('doneNum').textContent = '№' + r.num;
+      $('doneText').textContent = S.isNew
+        ? 'Новый поставщик добавлен — Лаура заполнит его профиль. Ответы придут в чат с ботом.'
+        : 'Ответы по заявке придут в чат с ботом. Фото счёта можно отправить туда же.';
+      show($('done'),true);
+      if(tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+    }).catch(function(e){
+      S.sending = false;
+      $('send').disabled = false;
+      $('send').textContent = 'Подать заявку';
+      // Честная формулировка: ответ потерян, но заявка МОГЛА быть создана —
+      // повтор уже был, и оба раза страница ответа не получила. Утверждать,
+      // что заявки нет, мы не вправе: чаще всего она есть.
+      err('Ответ от сервера не пришёл. Заявка, скорее всего, всё-таки подана — '+
+          'проверьте сообщение от бота в чате, прежде чем подавать заново.');
+    });
+  });
+
+  $('closeBtn').addEventListener('click', function(){
+    if(tg && tg.close) tg.close(); else window.close();
+  });
+})();
+</script>
+</body>
+</html>  и любое новое развёртывание расходило эти два места. Страница обращалась
   по мёртвому адресу, браузер отдавал «Load failed», а чинить это мог только
   человек с доступом к репозиторию. Теперь смена развёртывания — запуск одной
   функции в таблице, GitHub трогать не нужно.
