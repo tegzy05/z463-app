@@ -235,6 +235,589 @@
 
   <div class="field">
     <label>Счёт или накладная</label>
+    <input type="file" id="pick" hidden>
+    <button type="button" id="attach" class="attach">📎 Прикрепить файл или фото</button>
+    <div id="files"></div>
+    <div class="hint">Фото, скан или PDF — по одному, до трёх. Фото уменьшается перед отправкой.<br>
+      Не открывается — подайте заявку и отправьте файл боту сообщением.</div>
+  </div>
+
+  <div class="field hidden" id="noDocField">
+    <label for="noDoc">Почему нет документа</label>
+    <textarea id="noDoc" placeholder="Например: счёт будет после отгрузки"></textarea>
+    <div class="hint">Без документа заявку можно подать, но причину увидит согласующий.</div>
+  </div>
+
+  <div class="field">
+    <label for="doc">Номер счёта или накладной</label>
+    <input type="text" id="doc" placeholder="Необязательно">
+  </div>
+</div>
+
+<div class="submit" id="submitBar">
+  <button id="send">Подать заявку</button>
+</div>
+
+<div id="done" class="done hidden">
+  <div>Заявка принята</div>
+  <div class="num" id="doneNum"></div>
+  <p id="doneText"></p>
+  <button id="closeBtn">Закрыть</button>
+</div>
+
+<script>
+(function(){
+  // ---------- адрес сервера ----------
+  // Приходит из кнопки бота: .../?api=https://script.google.com/.../exec
+  // Резервный адрес — только на случай, если кнопку поставили без параметра
+  // (например, вручную через BotFather). Держать его в актуальном состоянии
+  // не обязательно: правильный путь — запустить НАСТРОИТЬ_MINIAPP в таблице.
+  var API_FALLBACK = 'ВСТАВЬТЕ_СЮДА_АДРЕС_РАЗВЁРТЫВАНИЯ';
+
+  var API_URL = (function(){
+    var q = '';
+    try{ q = new URLSearchParams(location.search).get('api') || ''; }catch(e){}
+    // Принимаем только адрес Apps Script: параметр приходит из URL, а
+    // отправлять туда подписанные данные кому попало нельзя.
+    return /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(q) ? q : API_FALLBACK;
+  })();
+
+  var tg = window.Telegram && window.Telegram.WebApp;
+  var initData = tg ? (tg.initData || '') : '';
+  if(tg){ tg.ready(); tg.expand(); }
+
+  var S = { suppliers:[], sup:'', isNew:false, cash:'Безнал', line:'', n1:50000, sending:false,
+            ready:false };   // ready — пришёл ли init: до него подавать нечего
+
+  function $(id){ return document.getElementById(id); }
+  function show(el,on){ el.classList[on?'remove':'add']('hidden'); }
+  function stop(html){
+    $('loading').classList.add('hidden');
+    // Форма теперь рисуется до ответа сервера, поэтому при отказе её надо
+    // убрать явно — иначе человек останется с полями, которые никуда не ведут.
+    show($('form'),false);
+    show($('submitBar'),false);
+    $('blockedText').innerHTML = html;
+    show($('blocked'),true);
+  }
+  function err(t){
+    var e=$('err');
+    if(!t){ show(e,false); return; }
+    e.textContent=t; show(e,true); e.scrollIntoView({block:'center'});
+  }
+
+  // Сорвавшийся fetch и отказ сервера — разные болезни с разным лечением,
+  // а браузер называет первую невнятно: «Load failed» на iPhone,
+  // «Failed to fetch» на Android. Переводим на язык действий.
+  function netHint(e){
+    var m = String((e && e.message) || e || '');
+    if(/load failed|failed to fetch|networkerror|network request failed/i.test(m)){
+      return 'Сервер не отвечает.<small>Адрес развёртывания недоступен: развёртывание удалено, '+
+             'архивировано или закрыто от анонимного доступа.<br><br>'+
+             'Азамату: запустите в таблице «⚙️ ФИНЦЕНТР → Проверка Mini App» — она покажет, '+
+             'что именно с адресом.</small>';
+    }
+    return 'Сервер ответил с ошибкой.<small>'+m.slice(0,200)+'</small>';
+  }
+
+  // Один заход с потолком по времени. Без него сорвавшийся обратный путь
+  // держит кнопку в «Отправляю…» столько, сколько решит система телефона, —
+  // на трассе это минуты, и человек всё это время не знает, что происходит.
+  function apiOnce(action, data, ms){
+    var ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = ctl ? setTimeout(function(){ try{ ctl.abort(); }catch(e){} }, ms) : 0;
+    function done(){ if(timer) clearTimeout(timer); }
+    return fetch(API_URL, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({action:action, initData:initData, data:data||{}}),
+      signal: ctl ? ctl.signal : undefined
+    }).then(function(r){ return r.text(); }).then(function(t){
+      done();
+      try{ return JSON.parse(t); }
+      catch(e){
+        throw new Error('Сервер ответил не по формату. Скорее всего, развёртывание не обновлено.');
+      }
+    }, function(e){
+      done();
+      throw e;
+    });
+  }
+
+  // Повтор при срыве — только для подачи. Там потеря ответа дорога: заявка
+  // уже создана, и без повтора человек подаёт её второй раз руками. Повтор
+  // безопасен, потому что сервер узнаёт подачу по отпечатку (кто, поставщик,
+  // сумма, текст) и отдаёт номер уже созданной заявки вместо второй.
+  //
+  // Открытию формы повтор только вредит: там терять нечего, а два захода по
+  // 25 секунд превращают недоступный сервер в минуту немого ожидания. Лучше
+  // один заход и честная ошибка — переоткрыть форму стоит одно нажатие.
+  function api(action, data){
+    var once = (action === 'init');
+    return apiOnce(action, data, once ? 30000 : 25000).catch(function(e){
+      if(once) throw e;
+      return new Promise(function(ok){ setTimeout(ok, 2000); })
+        .then(function(){ return apiOnce(action, data, 25000); });
+    });
+  }
+
+  // ---------- запуск ----------
+  if(!initData){
+    stop('Эта страница открывается только из Telegram — кнопкой «Заявка» в чате с ботом.');
+    return;
+  }
+  if(!/^https:\/\/script\.google\.com\//.test(API_URL)){
+    stop('Кнопка настроена не до конца.<small>Адрес сервера не передан. '+
+         'Азамату: запустите в таблице «⚙️ ФИНЦЕНТР → Настроить Mini App».</small>');
+    return;
+  }
+
+  // Форма уже на экране. Ответ только снимает блокировки и подставляет
+  // то, что известно лишь серверу: имя, юнит, список поставщиков, порог мелочи.
+  $('send').disabled = true;
+  api('init').then(function(r){
+    if(!r || !r.ok){ stop((r && r.err) ? r.err : 'Не удалось открыть форму.'); return; }
+    S.ready = true;
+    S.suppliers = r.suppliers || [];
+    S.n1 = r.n1 || 50000;
+    $('who').textContent = r.name + (r.unit ? ' · ' + r.unit : '');
+    if(r.needsLine){ show($('lineField'),true); S.line = 'Текущая работа (RUN)'; }
+    $('supQ').disabled = false;
+    $('supQ').placeholder = 'Начните вводить название';
+    $('send').disabled = false;
+    toggleCashbox();          // порог мелочи приехал только сейчас
+  }).catch(function(e){
+    stop(netHint(e));
+  });
+
+  // ---------- поставщик ----------
+  var q = $('supQ'), found = $('supFound');
+
+  q.addEventListener('input', function(){
+    var v = q.value.trim().toLowerCase();
+    found.innerHTML = '';
+    if(v.length < 2){ show(found,false); return; }
+
+    S.suppliers.filter(function(n){
+      return n.toLowerCase().indexOf(v) > -1;
+    }).slice(0,8).forEach(function(n){
+      var d = document.createElement('div');
+      d.textContent = n;
+      d.addEventListener('click', function(){ pick(n,false); });
+      found.appendChild(d);
+    });
+
+    // Новый поставщик — не «ничего не найдено», а действие. Показываем
+    // всегда: совпадение по подстроке не значит, что нужный там есть.
+    var add = document.createElement('div');
+    var span = document.createElement('span');
+    span.style.color = 'var(--accent)';
+    span.textContent = 'Добавить нового: ' + q.value.trim();
+    add.appendChild(span);
+    add.addEventListener('click', function(){ pick(q.value.trim(), true); });
+    found.appendChild(add);
+
+    show(found,true);
+  });
+
+  function pick(name, isNew){
+    if(!name) return;
+    S.sup = name; S.isNew = isNew;
+    $('supName').textContent = name + (isNew ? ' — новый' : '');
+    show($('supPick'),false);
+    show($('supPicked'),true);
+    err('');
+  }
+
+  $('supClear').addEventListener('click', function(){
+    S.sup=''; S.isNew=false; q.value='';
+    found.innerHTML=''; show(found,false);
+    show($('supPicked'),false);
+    show($('supPick'),true);
+    q.focus();
+  });
+
+  // ---------- сумма ----------
+  var sumEl = $('sum');
+  sumEl.addEventListener('input', function(){
+    var d = sumEl.value.replace(/[^\d]/g,'');
+    sumEl.value = d ? Number(d).toLocaleString('ru-RU').replace(/,/g,' ') : '';
+    toggleCashbox();
+  });
+  function sumVal(){ return Number(sumEl.value.replace(/[^\d]/g,'')) || 0; }
+
+  // ---------- переключатели ----------
+  function group(el, onPick){
+    el.addEventListener('click', function(ev){
+      var t = ev.target.closest('.opt');
+      if(!t) return;
+      Array.prototype.forEach.call(el.children, function(c){
+        c.setAttribute('aria-pressed', String(c === t));
+      });
+      onPick(t.getAttribute('data-v'));
+    });
+  }
+  group($('cashOpts'), function(v){ S.cash = v; toggleCashbox(); });
+  group($('lineOpts'), function(v){ S.line = v; });
+
+  // «Уже выдано из кассы» имеет смысл только для мелкой налички —
+  // в остальных случаях вопрос лишний и только путает.
+  function toggleCashbox(){
+    var on = (S.cash === 'Наличные' && sumVal() > 0 && sumVal() <= S.n1);
+    show($('cashboxField'), on);
+    if(!on) $('cashbox').checked = false;
+  }
+
+  // ---------- документы ----------
+  // Файл уходит вместе с заявкой. Фото ужимаем прямо в телефоне: снимок с
+  // камеры весит 3–5 МБ, на трассе это полминуты и частые обрывы, а для
+  // читаемого счёта хватает 1600 пикселей по длинной стороне.
+  var MAXW = 1600, MAX_PDF = 5*1024*1024, MAX_FILES = 3;
+  S.files = [];
+
+  function human(n){ return n<1024*1024 ? Math.round(n/1024)+' КБ' : (n/1048576).toFixed(1)+' МБ'; }
+
+  function drawFiles(){
+    var box = $('files'); box.innerHTML = '';
+    S.files.forEach(function(f, i){
+      var row = document.createElement('div'); row.className = 'fileRow';
+      var nm = document.createElement('span'); nm.textContent = f.name+' · '+human(f.bytes);
+      var del = document.createElement('button'); del.type = 'button'; del.textContent = 'Убрать';
+      del.addEventListener('click', function(){ S.files.splice(i,1); drawFiles(); });
+      row.appendChild(nm); row.appendChild(del); box.appendChild(row);
+    });
+    $('attach').textContent = S.files.length ? '📎 Добавить ещё файл' : '📎 Прикрепить файл или фото';
+    show($('attach'), S.files.length < MAX_FILES);
+    show($('noDocField'), S.files.length === 0);
+  }
+
+  function shrink(file){
+    return new Promise(function(done){
+      if(!/^image\//.test(file.type) || /heic|heif/i.test(file.type)) return done(null);
+      var img = new Image(), url = URL.createObjectURL(file);
+      img.onload = function(){
+        try{
+          var k = Math.min(1, MAXW/Math.max(img.width, img.height));
+          var c = document.createElement('canvas');
+          c.width = Math.round(img.width*k); c.height = Math.round(img.height*k);
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          URL.revokeObjectURL(url);
+          done(c.toDataURL('image/jpeg', 0.72));
+        }catch(e){ URL.revokeObjectURL(url); done(null); }
+      };
+      img.onerror = function(){ URL.revokeObjectURL(url); done(null); };
+      img.src = url;
+    });
+  }
+
+  function readB64(file){
+    return new Promise(function(done, fail){
+      var r = new FileReader();
+      r.onload = function(){ done(String(r.result)); };
+      r.onerror = function(){ fail(new Error('Файл не прочитался')); };
+      r.readAsDataURL(file);
+    });
+  }
+
+  $('attach').addEventListener('click', function(){ $('pick').click(); });
+  $('pick').addEventListener('change', function(){
+    var list = Array.prototype.slice.call($('pick').files || []);
+    $('pick').value = '';
+    // Пустой результат — не «человек передумал», а частый отказ WebView.
+    // Молчать нельзя: иначе кажется, что кнопка не работает.
+    if(!list.length){
+      err('Файл не пришёл. Подайте заявку и отправьте файл боту сообщением — он прикрепится к ней.');
+      $('attach').disabled = false; $('attach').textContent = '📎 Прикрепить файл или фото';
+      return;
+    }
+    err('');
+    $('attach').disabled = true; $('attach').textContent = 'Готовлю файл…';
+    (function next(){
+      if(!list.length){ $('attach').disabled = false; drawFiles(); return; }
+      var file = list.shift();
+      if(S.files.length >= MAX_FILES){ err('Больше '+MAX_FILES+' файлов за раз не получится.'); return next(); }
+      shrink(file).then(function(dataUrl){
+        if(dataUrl) return dataUrl;
+        if(file.size > MAX_PDF){ err('«'+file.name+'» больше 5 МБ — пришлите его боту сообщением после подачи.'); return null; }
+        return readB64(file);
+      }).then(function(dataUrl){
+        if(dataUrl){
+          var comma = dataUrl.indexOf(',');
+          var mime = (dataUrl.slice(5, comma).split(';')[0]) || file.type || 'application/octet-stream';
+          var b64 = dataUrl.slice(comma+1);
+          var name = /^image\//.test(mime) && !/\.(jpe?g|png)$/i.test(file.name) ? (file.name+'.jpg') : file.name;
+          S.files.push({name:name, mime:mime, data:b64, bytes:Math.round(b64.length*0.75)});
+        }
+        drawFiles(); next();
+      }).catch(function(){ err('Файл не прочитался — попробуйте другой.'); $('attach').disabled=false; next(); });
+    })();
+  });
+  drawFiles();
+
+  // ---------- отправка ----------
+  $('send').addEventListener('click', function(){
+    if(S.sending) return;
+    err('');
+
+    if(!S.ready){ err('Список ещё загружается — секунду.'); return; }
+    if(!S.sup){ err('Выберите поставщика'); return; }
+    if(!$('what').value.trim()){ err('Заполните, за что платим'); return; }
+    if(sumVal() <= 0){ err('Укажите сумму'); return; }
+    if(!S.files.length && !$('noDoc').value.trim()){
+      err('Приложите счёт или напишите, почему документа нет.');
+      $('noDoc').focus(); return;
+    }
+
+    S.sending = true;
+    $('send').disabled = true;
+    $('send').textContent = 'Отправляю…';
+
+    api('submit',{
+      sup: S.sup,
+      what: $('what').value.trim(),
+      sum: String(sumVal()),
+      cash: S.cash,
+      line: S.line,
+      urgent: $('urgent').checked,
+      paidFromCash: $('cashbox').checked,
+      doc: $('doc').value.trim(),
+      files: S.files.map(function(f){ return {name:f.name, mime:f.mime, data:f.data}; }),
+      noDoc: $('noDoc').value.trim()
+    }).then(function(r){
+      S.sending = false;
+      if(!r || !r.ok){
+        $('send').disabled = false;
+        $('send').textContent = 'Подать заявку';
+        err((r && r.err) ? r.err : 'Заявка не создана. Попробуйте ещё раз.');
+        return;
+      }
+      show($('form'),false);
+      show($('submitBar'),false);
+      $('doneNum').textContent = '№' + r.num;
+      $('doneText').textContent = S.isNew
+        ? 'Новый поставщик добавлен — Лаура заполнит его профиль. Ответы придут в чат с ботом.'
+        : 'Ответы по заявке придут в чат с ботом. Фото счёта можно отправить туда же.';
+      show($('done'),true);
+      if(tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+    }).catch(function(e){
+      S.sending = false;
+      $('send').disabled = false;
+      $('send').textContent = 'Подать заявку';
+      // Честная формулировка: ответ потерян, но заявка МОГЛА быть создана —
+      // повтор уже был, и оба раза страница ответа не получила. Утверждать,
+      // что заявки нет, мы не вправе: чаще всего она есть.
+      err('Ответ от сервера не пришёл. Заявка, скорее всего, всё-таки подана — '+
+          'проверьте сообщение от бота в чате, прежде чем подавать заново.');
+    });
+  });
+
+  $('closeBtn').addEventListener('click', function(){
+    if(tg && tg.close) tg.close(); else window.close();
+  });
+})();
+</script>
+</body>
+</html>
+  v1.3: ЗАПРОС БОЛЬШЕ НЕ ВИСИТ И НЕ СДАЁТСЯ С ПЕРВОГО РАЗА.
+  Было две беды. Первая: у fetch не стояло ограничения по времени, поэтому
+  при обрыве обратного пути кнопка показывала «Отправляю…» минуту и дольше,
+  хотя сервер давно ответил. Вторая: одна неудача — и страница объявляла
+  «Заявка НЕ подана», хотя в таблице строка уже была; человек подавал заново
+  и получал дубль.
+  Теперь у каждого запроса потолок 25 секунд, а при срыве страница сама
+  повторяет его один раз. Повтор безопасен: МИНИАПП.gs 1.9 узнаёт повторную
+  подачу по отпечатку (кто, поставщик, сумма, текст) и возвращает номер уже
+  созданной заявки вместо второй. Ровно для этого отпечаток и делался —
+  страница просто не умела им пользоваться.
+  И формулировки стали честными: страница не утверждает, что заявки нет,
+  когда она не знает этого наверняка.
+
+  Живёт на GitHub Pages, а не в Apps Script. Причина: Apps Script показывает
+  страницу во вложенном фрейме, а Telegram передаёт подписанные данные в
+  хеш-части адреса — до фрейма она не доходит, initData всегда пустой.
+
+  Отправка идёт с Content-Type: text/plain. Это не небрежность: страница и
+  сервер на разных доменах, а заголовок application/json заставил бы браузер
+  сначала послать запрос OPTIONS, на который Apps Script не отвечает. Тело
+  всё равно разбирается как JSON.
+
+  v1.2: АДРЕС РАЗВЁРТЫВАНИЯ БОЛЬШЕ НЕ ЗАШИТ В ЭТОТ ФАЙЛ.
+  Он приходит параметром ?api= из кнопки бота, которую ставит функция
+  НАСТРОИТЬ_MINIAPP. Причина: адрес живёт в Apps Script, а файл — на GitHub,
+  и после каждого нового развёртывания они расходились. Страница обращалась
+  по мёртвому адресу, браузер отдавал «Load failed», а починить это мог только
+  человек с доступом к репозиторию. Теперь смена развёртывания — запуск одной
+  функции в таблице, GitHub трогать не нужно.
+  Резервный адрес ниже используется, только если параметра нет.
+
+  Оформление наследует тему Telegram: экран должен выглядеть частью
+  мессенджера, а не чужим сайтом.
+-->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg:      var(--tg-theme-bg-color, #ffffff);
+    --fg:      var(--tg-theme-text-color, #000000);
+    --muted:   var(--tg-theme-hint-color, #8b8b8b);
+    --card:    var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --accent:  var(--tg-theme-button-color, #2481cc);
+    --onAccent:var(--tg-theme-button-text-color, #ffffff);
+    --danger:  #d64545;
+    --line:    rgba(128,128,128,.22);
+  }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; padding:0; background:var(--bg); color:var(--fg); }
+  body{
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 12px 16px 120px;
+  }
+  h1{ font-size:20px; font-weight:600; margin:4px 0 2px; }
+  .who{ color:var(--muted); font-size:14px; margin-bottom:20px; }
+
+  label{ display:block; font-size:14px; color:var(--muted); margin:0 0 6px; }
+  .field{ margin-bottom:20px; }
+
+  input[type=text], input[type=tel], textarea{
+    width:100%; font:inherit; color:var(--fg); background:var(--card);
+    border:1px solid transparent; border-radius:12px; padding:13px 14px;
+    appearance:none;
+  }
+  input:focus, textarea:focus{ outline:none; border-color:var(--accent); }
+  textarea{ resize:none; min-height:76px; }
+
+  /* Сумма — единственный крупный элемент. Её проверяют и заявитель,
+     и согласующий, поэтому она должна читаться с вытянутой руки. */
+  #sum{ font-size:30px; font-weight:600; letter-spacing:-0.5px; padding:14px; }
+  .sumRow{ display:flex; align-items:baseline; gap:10px; }
+  .sumRow .cur{ font-size:20px; color:var(--muted); }
+
+  .opts{ display:flex; gap:10px; }
+  .opt{
+    flex:1; text-align:center; padding:13px 8px; border-radius:12px;
+    background:var(--card); border:1.5px solid transparent; cursor:pointer;
+    font-size:15px; user-select:none;
+  }
+  .opt[aria-pressed="true"]{ border-color:var(--accent); color:var(--accent); font-weight:600; }
+
+  .check{ display:flex; align-items:center; gap:12px; padding:13px 14px;
+          background:var(--card); border-radius:12px; cursor:pointer; }
+  .check input{ width:20px; height:20px; accent-color:var(--accent); margin:0; flex:none; }
+  .check span{ font-size:15px; }
+  .check small{ display:block; color:var(--muted); font-size:13px; }
+
+  .found{ margin-top:8px; border-radius:12px; overflow:hidden; background:var(--card); }
+  .found div{ padding:12px 14px; border-bottom:1px solid var(--line); cursor:pointer; font-size:15px; }
+  .found div:last-child{ border-bottom:none; }
+  .picked{ display:flex; align-items:center; justify-content:space-between; gap:12px;
+           background:var(--card); border-radius:12px; padding:13px 14px; }
+  .picked b{ font-weight:600; }
+  .picked button{ background:none; border:none; color:var(--accent); font:inherit;
+                  padding:0; cursor:pointer; flex:none; }
+
+  .submit{
+    position:fixed; left:0; right:0; bottom:0; padding:12px 16px 20px;
+    background:linear-gradient(to top, var(--bg) 72%, transparent);
+  }
+  .submit button{
+    width:100%; padding:16px; font:inherit; font-size:17px; font-weight:600;
+    background:var(--accent); color:var(--onAccent); border:none; border-radius:12px;
+    cursor:pointer;
+  }
+  .submit button[disabled]{ opacity:.45; }
+
+  .msg{ padding:14px; border-radius:12px; font-size:15px; margin-bottom:18px;
+        background:rgba(214,69,69,.13); color:var(--danger); }
+  .msg small{ display:block; margin-top:8px; color:var(--muted); font-size:13px; }
+  .hint{ color:var(--muted); font-size:13px; margin-top:6px; }
+  .attach{ width:100%; padding:14px; border-radius:12px; font-size:16px; cursor:pointer;
+    border:1px dashed var(--hint,#8a8a8e); background:transparent; color:var(--link,#2481cc); }
+  .attach:active{ opacity:.7; }
+  .fileRow{ display:flex; align-items:center; gap:8px; margin-top:8px; font-size:14px; }
+  .fileRow span{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .fileRow button{ border:0; background:transparent; color:var(--destr,#e53935); font-size:15px; cursor:pointer; }
+  .hidden{ display:none !important; }
+
+  .done{ text-align:center; padding:56px 20px; }
+  .done .num{ font-size:40px; font-weight:600; margin:14px 0 6px; }
+  .done p{ color:var(--muted); margin:0 0 26px; }
+  .done button{ font:inherit; font-size:16px; padding:14px 30px; border:none;
+                border-radius:12px; background:var(--card); color:var(--fg); cursor:pointer; }
+</style>
+</head>
+<body>
+
+<div id="loading" class="who hidden">Загружаю…</div>
+
+<div id="blocked" class="hidden">
+  <div class="msg" id="blockedText"></div>
+</div>
+
+<div id="form">
+  <h1>Заявка на оплату</h1>
+  <div class="who" id="who"></div>
+
+  <div id="err" class="msg hidden"></div>
+
+  <div class="field">
+    <label for="supQ">Кому платим</label>
+    <div id="supPick">
+      <input type="text" id="supQ" placeholder="Загружаю список…" autocomplete="off" disabled>
+      <div class="found hidden" id="supFound"></div>
+      <div class="hint">Нет в списке? Введите название целиком и выберите «Добавить нового».</div>
+    </div>
+    <div class="picked hidden" id="supPicked">
+      <b id="supName"></b>
+      <button type="button" id="supClear">Изменить</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <label for="what">За что платим</label>
+    <textarea id="what" placeholder="Коротко, одной фразой"></textarea>
+  </div>
+
+  <div class="field">
+    <label for="sum">Сумма</label>
+    <div class="sumRow">
+      <input type="tel" id="sum" inputmode="numeric" placeholder="0">
+      <span class="cur">₸</span>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>Как платим</label>
+    <div class="opts" id="cashOpts">
+      <div class="opt" data-v="Безнал" aria-pressed="true">Безнал</div>
+      <div class="opt" data-v="Наличные" aria-pressed="false">Наличные</div>
+    </div>
+  </div>
+
+  <div class="field hidden" id="lineField">
+    <label>Линия</label>
+    <div class="opts" id="lineOpts">
+      <div class="opt" data-v="Текущая работа (RUN)" aria-pressed="true">Текущая работа</div>
+      <div class="opt" data-v="Развитие (BUILD)" aria-pressed="false">Развитие</div>
+    </div>
+  </div>
+
+  <div class="field hidden" id="cashboxField">
+    <label class="check">
+      <input type="checkbox" id="cashbox">
+      <span>Деньги уже выданы из кассы юнита
+        <small>Заявка уйдёт на подтверждение задним числом</small></span>
+    </label>
+  </div>
+
+  <div class="field">
+    <label class="check">
+      <input type="checkbox" id="urgent">
+      <span>Срочно
+        <small>Авария, штраф, простой. Уйдёт сразу Алуа и Аманкали</small></span>
+    </label>
+  </div>
+
+  <div class="field">
+    <label>Счёт или накладная</label>
     <input type="file" id="pick" accept="image/*,.pdf" hidden>
     <button type="button" id="attach" class="attach">📎 Прикрепить файл или фото</button>
     <div id="files"></div>
