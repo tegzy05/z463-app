@@ -123,6 +123,12 @@
   .go:disabled{ opacity:.45; cursor:default; }
   .go.route{ background:var(--bg2); color:var(--tx); }
   .alt{ display:block; margin:10px auto 0; background:none; border:0; color:var(--red); padding:6px; cursor:pointer; font-size:14px; }
+  .clip{ width:100%; border:1px dashed var(--hint); border-radius:var(--r-ctl); padding:11px; margin:0 0 10px;
+    background:none; color:var(--acc); font-size:15px; cursor:pointer; }
+  .clip:disabled{ opacity:.5; }
+  .frow{ display:flex; gap:8px; align-items:center; font-size:13px; color:var(--hint); margin:0 0 8px; }
+  .frow span{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .frow button{ border:0; background:none; color:var(--red); font-size:14px; cursor:pointer; }
   .refuse textarea{ width:100%; min-height:72px; font:inherit; color:var(--tx); background:var(--bg2); border:0;
     border-radius:var(--r-ctl); padding:10px; resize:vertical; margin-bottom:10px; }
   .pair{ display:flex; gap:8px; }
@@ -195,9 +201,87 @@
   var factOf = {};         // num → фактическая сумма (строка из поля)
   var whyOf = {};          // num → причина превышения
   var errOf = {};          // num → текст ошибки
+  var docsOf = {};         // num → приложенные платёжки [{name,mime,data,bytes}]
   var lastAcc = {};        // «юрлицо|нал» → счёт, выбранный в этой сессии
 
   var $ = function(id){ return document.getElementById(id); };
+  // ---------- платёжка ----------
+  // Фото ужимаем в телефоне: чек с камеры весит мегабайты, на трассе это
+  // обрыв на полпути, а для читаемого документа хватает 1600 пикселей.
+  var MAXW = 1600, MAX_FILE = 5*1024*1024, MAX_DOCS = 3;
+
+  function humanSize(n){ return n<1048576 ? Math.round(n/1024)+' КБ' : (n/1048576).toFixed(1)+' МБ'; }
+
+  function shrinkImg(file){
+    return new Promise(function(done){
+      if(!/^image\//.test(file.type) || /heic|heif/i.test(file.type)) return done(null);
+      var img = new Image(), url = URL.createObjectURL(file);
+      img.onload = function(){
+        try{
+          var k = Math.min(1, MAXW/Math.max(img.width, img.height));
+          var c = document.createElement('canvas');
+          c.width = Math.round(img.width*k); c.height = Math.round(img.height*k);
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          URL.revokeObjectURL(url); done(c.toDataURL('image/jpeg', 0.72));
+        }catch(e){ URL.revokeObjectURL(url); done(null); }
+      };
+      img.onerror = function(){ URL.revokeObjectURL(url); done(null); };
+      img.src = url;
+    });
+  }
+
+  function readDataUrl(file){
+    return new Promise(function(done, fail){
+      var r = new FileReader();
+      r.onload = function(){ done(String(r.result)); };
+      r.onerror = function(){ fail(new Error('нечитаемый файл')); };
+      r.readAsDataURL(file);
+    });
+  }
+
+  function addDocs(it, list){
+    var queue = Array.prototype.slice.call(list||[]);
+    (function next(){
+      if(!queue.length){ render(); return; }
+      var file = queue.shift();
+      if((docsOf[it.num]||[]).length >= MAX_DOCS){ errOf[it.num] = 'Больше '+MAX_DOCS+' файлов не нужно.'; return next(); }
+      shrinkImg(file).then(function(u){
+        if(u) return u;
+        if(file.size > MAX_FILE){ errOf[it.num] = '«'+file.name+'» больше 5 МБ — пришлите его боту сообщением.'; return null; }
+        return readDataUrl(file);
+      }).then(function(u){
+        if(u){
+          var c = u.indexOf(','), mime = u.slice(5, c).split(';')[0] || file.type || 'application/octet-stream';
+          var data = u.slice(c+1);
+          var name = /^image\//.test(mime) && !/\.(jpe?g|png)$/i.test(file.name) ? file.name+'.jpg' : file.name;
+          (docsOf[it.num] = docsOf[it.num] || []).push({name:name, mime:mime, data:data, bytes:Math.round(data.length*0.75)});
+        }
+        next();
+      }).catch(function(){ errOf[it.num] = 'Файл не прочитался — попробуйте другой.'; next(); });
+    })();
+  }
+
+  function docBox(it, dis){
+    var wrap = el('div','docs'), have = docsOf[it.num] || [];
+    have.forEach(function(f, i){
+      var row = el('div','frow');
+      row.appendChild(el('span', '', '🧾 '+f.name+' · '+humanSize(f.bytes)));
+      var x = el('button','','Убрать'); x.type='button'; x.disabled = dis;
+      x.onclick = function(){ have.splice(i,1); render(); };
+      row.appendChild(x); wrap.appendChild(row);
+    });
+    if(have.length < MAX_DOCS){
+      var inp = document.createElement('input');
+      inp.type='file'; inp.accept='image/*,application/pdf'; inp.multiple = true; inp.style.display='none';
+      inp.onchange = function(){ var l = inp.files; inp.value=''; addDocs(it, l); };
+      var btn = el('button','clip', have.length ? '📎 Ещё платёжка' : '🧾 Приложить платёжку — уйдёт заявителю');
+      btn.type='button'; btn.disabled = dis;
+      btn.onclick = function(){ inp.click(); };
+      wrap.appendChild(inp); wrap.appendChild(btn);
+    }
+    return wrap;
+  }
+
   function el(tag, cls, text){
     var n = document.createElement(tag);
     if(cls) n.className = cls;
@@ -526,6 +610,11 @@
       return b;
     }
 
+    // Платёжка прикладывается здесь же: казначей только что вышел из банка,
+    // документ у него на руках. Необязательно — банк иногда отдаёт чек позже,
+    // и тогда его дошлют ответом на сообщение бота.
+    b.appendChild(docBox(it, dis));
+
     var go = el('button','go', dis ? 'Отмечаю…' : 'Отметить оплату ' + money(cur));
     go.type = 'button'; go.id = 'go'+it.num;
     go.disabled = dis || !choice[it.num] || !payable(it);
@@ -692,8 +781,11 @@
       if(!ok) return;
       busy[it.num] = true; errOf[it.num] = ''; render();
       api('pay', {num:it.num, sum:it.sum, acc:acc, date:date,
-        factSum: (cur!==it.sum ? cur : undefined), why: whyOf[it.num] || ''}).then(function(r){
+        factSum: (cur!==it.sum ? cur : undefined), why: whyOf[it.num] || '',
+        files: (docsOf[it.num]||[]).map(function(f){ return {name:f.name, mime:f.mime, data:f.data}; })
+      }).then(function(r){
         if(r.ok){
+          delete docsOf[it.num];
           lastAcc[accKey(it)] = acc;
           it.sum = r.sum || cur;
           (D.paid = D.paid || []).unshift({num:it.num, sup:it.sup, what:it.what, sum:it.sum, acc:acc,
