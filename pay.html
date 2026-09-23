@@ -8,6 +8,18 @@
 <!--
   ФИНЦЕНТР Z-463 — экран казначея. Лежит в репозитории z463-app рядом с index.html.
 
+  Версия 1.2.1 · 23.09.2026
+
+  v1.2: платёжку можно приложить прямо здесь — она уходит заявителю и
+  ложится на Диск рядом со счётом. Необязательно: банк иногда отдаёт чек
+  позже, и тогда его дошлют ответом на сообщение бота «Оплачено».
+  v1.2.1: поле выбора файла вынесено из карточки. Карточки пересобираются
+  при каждой перерисовке, и поле исчезало, пока открыт выбор файла, — тогда
+  браузеру Telegram уже некому отдать результат, и по нажатию «ничего не
+  грузилось». Теперь поле одно на страницу и живёт вне перерисовки, файл
+  выбирается по одному, а пустой результат больше не молчит: страница
+  говорит, что файл не пришёл, и напоминает про досылку боту.
+
   Адрес сервера НЕ зашит в этот файл: он приходит параметром ?api= в кнопке
   бота (ПАРАМЕТРЫ → WEBAPP_URL). Сменили развёртывание — ничего здесь не трогаем.
 
@@ -261,6 +273,27 @@
     })();
   }
 
+  // Поле выбора файла живёт ОДНО на всю страницу и вне перерисовки.
+  // Карточки пересобираются при каждом render(), и поле, созданное внутри
+  // карточки, успевало исчезнуть, пока открыт выбор файла, — тогда браузер
+  // Telegram уже некому отдать результат, и по нажатию «ничего не грузилось».
+  // Здесь же выбираем по одному файлу: список типов вместе с multiple
+  // некоторые версии WebView обрабатывают неверно и возвращают пусто.
+  var pickFor = null;
+  var PICK = document.createElement('input');
+  PICK.type = 'file'; PICK.accept = 'image/*,.pdf'; PICK.style.display = 'none';
+  PICK.addEventListener('change', function(){
+    var files = PICK.files, it = pickFor;
+    PICK.value = ''; pickFor = null;
+    if(!it) return;
+    if(!files || !files.length){
+      errOf[it.num] = 'Файл не пришёл. Пришлите платёжку ответом на сообщение бота «Оплачено».';
+      render(); return;
+    }
+    addDocs(it, files);
+  });
+  document.body.appendChild(PICK);
+
   function docBox(it, dis){
     var wrap = el('div','docs'), have = docsOf[it.num] || [];
     have.forEach(function(f, i){
@@ -271,13 +304,11 @@
       row.appendChild(x); wrap.appendChild(row);
     });
     if(have.length < MAX_DOCS){
-      var inp = document.createElement('input');
-      inp.type='file'; inp.accept='image/*,application/pdf'; inp.multiple = true; inp.style.display='none';
-      inp.onchange = function(){ var l = inp.files; inp.value=''; addDocs(it, l); };
       var btn = el('button','clip', have.length ? '📎 Ещё платёжка' : '🧾 Приложить платёжку — уйдёт заявителю');
       btn.type='button'; btn.disabled = dis;
-      btn.onclick = function(){ inp.click(); };
-      wrap.appendChild(inp); wrap.appendChild(btn);
+      btn.onclick = function(){ pickFor = it; PICK.click(); };
+      wrap.appendChild(btn);
+      wrap.appendChild(el('p','hint','Не открывается — пришлите платёжку ответом на сообщение бота «Оплачено».'));
     }
     return wrap;
   }
