@@ -8,7 +8,7 @@
 <!--
   ФИНЦЕНТР Z-463 — экран казначея. Лежит в репозитории z463-app рядом с index.html.
 
-  Версия 1.2.3 · 23.09.2026
+  Версия 1.3 · 23.09.2026
 
   v1.2: платёжку можно приложить прямо здесь — она уходит заявителю и
   ложится на Диск рядом со счётом. Необязательно: банк иногда отдаёт чек
@@ -19,11 +19,20 @@
   грузилось». Теперь поле одно на страницу и живёт вне перерисовки, файл
   выбирается по одному, а пустой результат больше не молчит: страница
   говорит, что файл не пришёл, и напоминает про досылку боту.
-  v1.2.3: поле выбора файла объявлено в разметке — слово в слово как в
-  index.html, где приложение файла работает: с accept и multiple, скрытое
-  атрибутом hidden. Созданное кодом и без accept, оно в браузере Telegram
-  открывало выбор, но возвращало пусто. Отдельно ловится файл нулевого
-  размера — так выглядит фото, ещё не выгруженное из iCloud.
+  v1.3: добавлена кнопка «приложить через чат» — запасной путь, не зависящий
+  от браузера Telegram. Он закрывает страницу, бот присылает сообщение с
+  номером заявки, казначей отвечает на него фотографией. Нужен потому, что
+  выбор файла внутри мини-приложения на части устройств открывается, но
+  возвращает пусто, и платёжку приложить нечем.
+  v1.3: приложение платёжки убрано с этой страницы. Выбор файла здесь не
+  срабатывал ни у Лауры, ни у Ерсайына — при том что у тех же людей и на
+  том же телефоне форма подачи файл принимала. Перебрали всё: поле в
+  разметке вместо созданного кодом, accept, multiple, одно поле на страницу
+  вне перерисовки. Не помогло ничего, и держать кнопку, которая обманывает,
+  хуже, чем не держать вовсе.
+  Теперь платёжка прикладывается на отдельной странице doc.html, устроенной
+  как форма подачи: кнопка «🧾 Приложить платёжку» появляется под сообщением
+  «Оплачено» сразу после отметки.
 
   Адрес сервера НЕ зашит в этот файл: он приходит параметром ?api= в кнопке
   бота (ПАРАМЕТРЫ → WEBAPP_URL). Сменили развёртывание — ничего здесь не трогаем.
@@ -226,105 +235,9 @@
   var factOf = {};         // num → фактическая сумма (строка из поля)
   var whyOf = {};          // num → причина превышения
   var errOf = {};          // num → текст ошибки
-  var docsOf = {};         // num → приложенные платёжки [{name,mime,data,bytes}]
   var lastAcc = {};        // «юрлицо|нал» → счёт, выбранный в этой сессии
 
   var $ = function(id){ return document.getElementById(id); };
-  // ---------- платёжка ----------
-  // Фото ужимаем в телефоне: чек с камеры весит мегабайты, на трассе это
-  // обрыв на полпути, а для читаемого документа хватает 1600 пикселей.
-  var MAXW = 1600, MAX_FILE = 5*1024*1024, MAX_DOCS = 3;
-
-  function humanSize(n){ return n<1048576 ? Math.round(n/1024)+' КБ' : (n/1048576).toFixed(1)+' МБ'; }
-
-  function shrinkImg(file){
-    return new Promise(function(done){
-      if(!/^image\//.test(file.type) || /heic|heif/i.test(file.type)) return done(null);
-      var img = new Image(), url = URL.createObjectURL(file);
-      img.onload = function(){
-        try{
-          var k = Math.min(1, MAXW/Math.max(img.width, img.height));
-          var c = document.createElement('canvas');
-          c.width = Math.round(img.width*k); c.height = Math.round(img.height*k);
-          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-          URL.revokeObjectURL(url); done(c.toDataURL('image/jpeg', 0.72));
-        }catch(e){ URL.revokeObjectURL(url); done(null); }
-      };
-      img.onerror = function(){ URL.revokeObjectURL(url); done(null); };
-      img.src = url;
-    });
-  }
-
-  function readDataUrl(file){
-    return new Promise(function(done, fail){
-      var r = new FileReader();
-      r.onload = function(){ done(String(r.result)); };
-      r.onerror = function(){ fail(new Error('нечитаемый файл')); };
-      r.readAsDataURL(file);
-    });
-  }
-
-  function addDocs(it, list){
-    var queue = Array.prototype.slice.call(list||[]);
-    (function next(){
-      if(!queue.length){ render(); return; }
-      var file = queue.shift();
-      if((docsOf[it.num]||[]).length >= MAX_DOCS){ errOf[it.num] = 'Больше '+MAX_DOCS+' файлов не нужно.'; return next(); }
-      shrinkImg(file).then(function(u){
-        if(u) return u;
-        if(file.size > MAX_FILE){ errOf[it.num] = '«'+file.name+'» больше 5 МБ — пришлите его боту сообщением.'; return null; }
-        return readDataUrl(file);
-      }).then(function(u){
-        if(u){
-          var c = u.indexOf(','), mime = u.slice(5, c).split(';')[0] || file.type || 'application/octet-stream';
-          var data = u.slice(c+1);
-          var name = /^image\//.test(mime) && !/\.(jpe?g|png)$/i.test(file.name) ? file.name+'.jpg' : file.name;
-          (docsOf[it.num] = docsOf[it.num] || []).push({name:name, mime:mime, data:data, bytes:Math.round(data.length*0.75)});
-        }
-        next();
-      }).catch(function(){ errOf[it.num] = 'Файл не прочитался — попробуйте другой.'; next(); });
-    })();
-  }
-
-  var pickFor = null;
-  var PICK = document.getElementById('pick');
-  PICK.addEventListener('change', function(){
-    var files = PICK.files, it = pickFor;
-    PICK.value = ''; pickFor = null;
-    if(!it) return;
-    if(!files || !files.length){
-      // Пусто приходит и когда человек передумал, и когда WebView не отдал
-      // файл. Различить нельзя, поэтому не пугаем ошибкой, а подсказываем.
-      errOf[it.num] = 'Файл не выбран. Если выбирали, но он не появился — пришлите платёжку ответом на сообщение бота «Оплачено».';
-      render(); return;
-    }
-    if(files[0] && files[0].size === 0){
-      // Ноль байт — обычно фото лежит в iCloud и не успело скачаться.
-      errOf[it.num] = 'Файл пустой: фото, скорее всего, ещё в iCloud. Откройте его в «Фото», дождитесь загрузки и повторите.';
-      render(); return;
-    }
-    addDocs(it, files);
-  });
-
-  function docBox(it, dis){
-    var wrap = el('div','docs'), have = docsOf[it.num] || [];
-    have.forEach(function(f, i){
-      var row = el('div','frow');
-      row.appendChild(el('span', '', '🧾 '+f.name+' · '+humanSize(f.bytes)));
-      var x = el('button','','Убрать'); x.type='button'; x.disabled = dis;
-      x.onclick = function(){ have.splice(i,1); render(); };
-      row.appendChild(x); wrap.appendChild(row);
-    });
-    if(have.length < MAX_DOCS){
-      var btn = el('button','clip', have.length ? '📎 Ещё платёжка' : '🧾 Приложить платёжку — уйдёт заявителю');
-      btn.type='button'; btn.disabled = dis;
-      btn.onclick = function(){ pickFor = it; PICK.click(); };
-      wrap.appendChild(btn);
-      wrap.appendChild(el('p','hint','Если файл не прикрепляется — пришлите платёжку ответом на сообщение бота «Оплачено», это всегда работает.'));
-    }
-    return wrap;
-  }
-
   function el(tag, cls, text){
     var n = document.createElement(tag);
     if(cls) n.className = cls;
@@ -653,10 +566,10 @@
       return b;
     }
 
-    // Платёжка прикладывается здесь же: казначей только что вышел из банка,
-    // документ у него на руках. Необязательно — банк иногда отдаёт чек позже,
-    // и тогда его дошлют ответом на сообщение бота.
-    b.appendChild(docBox(it, dis));
+    // Платёжка прикладывается НЕ здесь: на этой странице выбор файла не
+    // срабатывал ни у одного казначея. После отметки оплаты под сообщением
+    // «Оплачено» появляется кнопка «🧾 Приложить платёжку» — она открывает
+    // отдельную страницу, устроенную как форма подачи.
 
     var go = el('button','go', dis ? 'Отмечаю…' : 'Отметить оплату ' + money(cur));
     go.type = 'button'; go.id = 'go'+it.num;
@@ -824,11 +737,9 @@
       if(!ok) return;
       busy[it.num] = true; errOf[it.num] = ''; render();
       api('pay', {num:it.num, sum:it.sum, acc:acc, date:date,
-        factSum: (cur!==it.sum ? cur : undefined), why: whyOf[it.num] || '',
-        files: (docsOf[it.num]||[]).map(function(f){ return {name:f.name, mime:f.mime, data:f.data}; })
+        factSum: (cur!==it.sum ? cur : undefined), why: whyOf[it.num] || ''
       }).then(function(r){
         if(r.ok){
-          delete docsOf[it.num];
           lastAcc[accKey(it)] = acc;
           it.sum = r.sum || cur;
           (D.paid = D.paid || []).unshift({num:it.num, sup:it.sup, what:it.what, sum:it.sum, acc:acc,
