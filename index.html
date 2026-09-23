@@ -6,7 +6,7 @@
 <title>Заявка на оплату</title>
 <!--
   ФИНЦЕНТР TruckStop Z-463 — экран подачи заявки (Telegram Mini App)
-  Версия 1.6 · 23.09.2026 · репозиторий z463-app
+  Версия 1.5 · 23.09.2026 · репозиторий z463-app
 
   v1.5: СЧЁТ ПРИКЛАДЫВАЕТСЯ ЗДЕСЬ ЖЕ. Раньше форма просила отправить фото
   боту отдельным сообщением после подачи — шаг, про который забывали, и
@@ -235,11 +235,10 @@
 
   <div class="field">
     <label>Счёт или накладная</label>
-    <input type="file" id="pick" hidden>
+    <input type="file" id="pick" accept="image/*,application/pdf" multiple hidden>
     <button type="button" id="attach" class="attach">📎 Прикрепить файл или фото</button>
     <div id="files"></div>
-    <div class="hint">Фото, скан или PDF — по одному, до трёх. Фото уменьшается перед отправкой.<br>
-      Не открывается — подайте заявку и отправьте файл боту сообщением.</div>
+    <div class="hint">Фото, скан или PDF. До трёх файлов. Фото уменьшается перед отправкой.</div>
   </div>
 
   <div class="field hidden" id="noDocField">
@@ -523,13 +522,7 @@
   $('pick').addEventListener('change', function(){
     var list = Array.prototype.slice.call($('pick').files || []);
     $('pick').value = '';
-    // Пустой результат — не «человек передумал», а частый отказ WebView.
-    // Молчать нельзя: иначе кажется, что кнопка не работает.
-    if(!list.length){
-      err('Файл не пришёл. Подайте заявку и отправьте файл боту сообщением — он прикрепится к ней.');
-      $('attach').disabled = false; $('attach').textContent = '📎 Прикрепить файл или фото';
-      return;
-    }
+    if(!list.length) return;
     err('');
     $('attach').disabled = true; $('attach').textContent = 'Готовлю файл…';
     (function next(){
